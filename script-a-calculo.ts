@@ -102,7 +102,10 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
   } catch (e) {
     throw new Error("ofertasJson no es un JSON valido. Detalle: " + String(e));
   }
-  if (!ofertas || ofertas.length === 0) {
+  if (!ofertas || !Array.isArray(ofertas)) {
+    throw new Error("ofertasJson debe ser un ARRAY de ofertas [ { nombre, filas }, ... ] y ha llegado otro tipo de JSON. Revisa el paso que compone ofertasJson en Power Automate.");
+  }
+  if (ofertas.length === 0) {
     throw new Error("El JSON no contiene ninguna oferta.");
   }
 
@@ -127,11 +130,15 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
   let importeMap: { [k: string]: number }[] = [];    // por oferta: clave → importe
   let dupPartida: { [cod: string]: boolean } = {};   // codigos de partida repetidos en alguna oferta
 
-  let capOrden: string[] = [];                       // codigos de capitulos PADRE
+  // Los capitulos padre se identifican por CLAVE = codigo + "|" + ocurrencia, no solo
+  // por codigo: asi, si un codigo de padre viene repetido dentro de una oferta, cada
+  // FILA padre cuenta por si misma (manda la posicion) y su importe suma al PEC.
+  let capOrden: string[] = [];                       // claves de capitulos PADRE
   let capSeen: { [c: string]: boolean } = {};
+  let capCodigo: { [c: string]: string } = {};       // clave → codigo visible
   let capNombre: { [c: string]: string } = {};
-  let capImporte: { [c: string]: number }[] = [];    // por oferta: padre → importe de SU fila
-  let sumaPartidas: { [c: string]: number }[] = [];  // por oferta: padre → suma de sus partidas
+  let capImporte: { [c: string]: number }[] = [];    // por oferta: clave padre → importe de SU fila
+  let sumaPartidas: { [c: string]: number }[] = [];  // por oferta: clave padre → suma de sus partidas
   let totalPEC: number[] = [];                       // por oferta: suma de filas padre
   let avisosDatos: string[] = [];                    // avisos de integridad de datos
 
@@ -147,8 +154,10 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
     let sPart: { [c: string]: number } = {};
     let occCap: { [c: string]: number } = {};   // ocurrencias de codigos de capitulo
     let occPar: { [c: string]: number } = {};   // ocurrencias de codigos de partida
-    let padreActual = "";                        // ultimo capitulo PADRE visto (posicion)
-    let huerfanas = 0;                           // importe de partidas antes del 1er padre
+    let occPad: { [c: string]: number } = {};   // ocurrencias de codigos de capitulo PADRE
+    let padreActual = "";                        // CLAVE del ultimo padre visto (posicion)
+    let huerfanas = 0;                           // importe NETO de partidas antes del 1er padre
+    let huerfanasAbs = 0;                        // suma de |importe| (evita compensaciones)
 
     for (let j = 0; j < fs.length; j++) {
       let f = fs[j];
@@ -169,14 +178,23 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
         if (iM[clave] === undefined) { iM[clave] = f.importe; }
 
         if (f.nivel === "padre") {
-          // El importe oficial del capitulo padre es el de ESTA fila.
-          padreActual = cod;
-          if (!capSeen[cod]) { capSeen[cod] = true; capOrden.push(cod); capNombre[cod] = res; }
-          if (cImp[cod] === undefined) {
-            cImp[cod] = f.importe;
-          } else {
-            // Padre repetido dentro de la misma oferta: se usa la primera fila y se avisa.
-            avisosDatos.push("AVISO " + nombres[k] + ": el capitulo padre " + cod + " aparece mas de una vez; se usa el importe de su primera fila (" + r2(cImp[cod]) + " EUR).");
+          // El importe oficial del capitulo padre es el de ESTA fila. Si el codigo se
+          // repite dentro de la oferta, cada aparicion es un capitulo DISTINTO (clave
+          // codigo|ocurrencia): las apariciones n-esimas se alinean entre ofertas, y
+          // TODAS las filas padre suman al PEC (criterio maestro: manda la posicion).
+          let nPad = occPad[cod] === undefined ? 0 : occPad[cod];
+          occPad[cod] = nPad + 1;
+          let capClave = cod + "|" + nPad;
+          padreActual = capClave;
+          if (!capSeen[capClave]) {
+            capSeen[capClave] = true;
+            capOrden.push(capClave);
+            capCodigo[capClave] = cod;
+            capNombre[capClave] = res;
+          }
+          if (cImp[capClave] === undefined) { cImp[capClave] = f.importe; }
+          if (nPad === 1) {
+            avisosDatos.push("AVISO " + nombres[k] + ": el capitulo padre " + cod + " aparece mas de una vez; cada aparicion se trata como un capitulo distinto (alineadas por orden) y TODAS sus filas suman al PEC. Revisa el Excel de origen.");
           }
         }
         // Los subcapitulos NO se suman a nada: su detalle ya esta en las partidas y el
@@ -202,11 +220,13 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
         sPart[padreActual] = (sPart[padreActual] || 0) + f.importe;
       } else {
         huerfanas += f.importe;
+        huerfanasAbs += Math.abs(f.importe); // en absoluto: un descuento negativo o dos
+                                             // partidas que se compensan tambien avisan
       }
     }
 
-    if (huerfanas > TOLERANCIA_CUADRE_CAPITULO) {
-      avisosDatos.push("AVISO " + nombres[k] + ": hay partidas ANTES del primer capitulo padre por " + r2(huerfanas) + " EUR; no cuentan en el PEC de ningun capitulo. Revisa el Excel de origen.");
+    if (huerfanasAbs > TOLERANCIA_CUADRE_CAPITULO) {
+      avisosDatos.push("AVISO " + nombres[k] + ": hay partidas ANTES del primer capitulo padre (neto " + r2(huerfanas) + " EUR, " + r2(huerfanasAbs) + " EUR en valor absoluto); no cuentan en el PEC de ningun capitulo. Revisa el Excel de origen.");
     }
 
     // TOTAL PEC de la oferta = suma de los importes de las filas de capitulos padre
@@ -244,7 +264,7 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
   // ===================================================================================
   // AGRUPACIÓN POR OFICIOS + VALIDACIÓN CRÍTICA (grupos vs TOTAL PEC)
   // ===================================================================================
-  let agr = calcularAgrupado(capOrden, capImporte, N);
+  let agr = calcularAgrupado(capOrden, capCodigo, capImporte, N);
 
   // Los avisos de integridad de datos tambien se muestran en "Resumen agrupado"
   for (let a = 0; a < avisosDatos.length; a++) { agr.avisos.push(avisosDatos[a]); }
@@ -263,7 +283,7 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
   // ESCRITURA DE LAS CUATRO HOJAS (solo valores) + CONTRATO
   // ===================================================================================
   let layR = hojaResumenA(workbook, HOJA_RESUMEN, nombres, totalPEC, UMBRAL_ANOMALIA_PEM);
-  let layC = hojaCapitulosA(workbook, HOJA_CAPITULOS, nombres, capOrden, capNombre, capImporte, avisoCap);
+  let layC = hojaCapitulosA(workbook, HOJA_CAPITULOS, nombres, capOrden, capCodigo, capNombre, capImporte, avisoCap);
   let layG = hojaAgrupadoA(workbook, HOJA_AGRUPADO, nombres, agr);
   let layP = hojaPartidasA(workbook, HOJA_PARTIDAS, nombres, orden, info, precioMap, importeMap, dupPartida);
 
@@ -303,28 +323,35 @@ function tablaGrupos(): Grupo[] {
 //  - Capitulo repetido en dos grupos → se cuenta SOLO en el primero + AVISO.
 //  - Capitulo padre presente en las ofertas pero ausente de la tabla → grupo automatico
 //    "SIN CLASIFICAR (REVISAR)" + AVISO con los codigos y el importe afectado.
-function calcularAgrupado(capOrden: string[], capImporte: { [c: string]: number }[], N: number): AgrupadoCalc {
+function calcularAgrupado(capOrden: string[], capCodigo: { [c: string]: string },
+  capImporte: { [c: string]: number }[], N: number): AgrupadoCalc {
   let base = tablaGrupos();
-  let capGrupo: { [c: string]: number } = {};
+  let codGrupo: { [cod: string]: number } = {};   // codigo de capitulo → indice de grupo
   let avisos: string[] = [];
 
   for (let g = 0; g < base.length; g++) {
     let caps = base[g].capitulos;
     for (let j = 0; j < caps.length; j++) {
-      if (capGrupo[caps[j]] !== undefined) {
-        avisos.push("AVISO: el capitulo " + caps[j] + " aparece en los grupos \"" + base[capGrupo[caps[j]]].nombre + "\" y \"" + base[g].nombre + "\". Se contabiliza solo en el primero. Corrige la tabla de grupos.");
+      if (codGrupo[caps[j]] !== undefined) {
+        avisos.push("AVISO: el capitulo " + caps[j] + " aparece en los grupos \"" + base[codGrupo[caps[j]]].nombre + "\" y \"" + base[g].nombre + "\". Se contabiliza solo en el primero. Corrige la tabla de grupos.");
       } else {
-        capGrupo[caps[j]] = g;
+        codGrupo[caps[j]] = g;
       }
     }
   }
 
-  // Capitulos padre presentes en las ofertas que no estan en ningun grupo de la tabla
+  // Capitulos padre presentes en las ofertas que no estan en ningun grupo de la tabla.
+  // capOrden contiene CLAVES (codigo|ocurrencia); el grupo se decide por el CODIGO.
   let sinGrupo: string[] = [];
+  let claveGrupo: { [clave: string]: number } = {};
   for (let c = 0; c < capOrden.length; c++) {
-    if (capGrupo[capOrden[c]] === undefined) {
-      sinGrupo.push(capOrden[c]);
-      capGrupo[capOrden[c]] = base.length; // indice del grupo automatico
+    let clave = capOrden[c];
+    let g = codGrupo[capCodigo[clave]];
+    if (g === undefined) {
+      sinGrupo.push(capCodigo[clave]);
+      claveGrupo[clave] = base.length; // indice del grupo automatico
+    } else {
+      claveGrupo[clave] = g;
     }
   }
 
@@ -346,7 +373,7 @@ function calcularAgrupado(capOrden: string[], capImporte: { [c: string]: number 
   }
   for (let c = 0; c < capOrden.length; c++) {
     let cap = capOrden[c];
-    let g = capGrupo[cap];
+    let g = claveGrupo[cap];
     for (let i = 0; i < N; i++) {
       if (capImporte[i][cap] !== undefined) {
         sumas[g][i] += capImporte[i][cap];
@@ -438,7 +465,7 @@ function hojaResumenA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: str
 //           y al FINAL una columna "Aviso" con "X" donde las partidas no casan con
 //           la fila del capitulo (y entre parentesis, en que ofertas).
 function hojaCapitulosA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: string[],
-  capOrden: string[], capNombre: { [c: string]: string },
+  capOrden: string[], capCodigo: { [c: string]: string }, capNombre: { [c: string]: string },
   capImporte: { [c: string]: number }[], avisoCap: { [c: string]: string[] }): LayoutCapitulos {
 
   let ws = recrear(wb, nombreHoja);
@@ -469,7 +496,8 @@ function hojaCapitulosA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: s
     }
     let media = cuenta > 0 ? sumaCap / cuenta : 0;
 
-    let fila: (string | number)[] = [cap, capNombre[cap] || "", r2(media)];
+    // En la columna Cod se muestra el CODIGO (la clave interna lleva ademas la ocurrencia)
+    let fila: (string | number)[] = [capCodigo[cap] || cap, capNombre[cap] || "", r2(media)];
     for (let i = 0; i < N; i++) {
       if (capImporte[i][cap] !== undefined) {
         let v = r2(capImporte[i][cap]);
@@ -769,11 +797,16 @@ function limpiarNombre(n: string): string {
   return s.replace(/\.(xlsx|xlsm|xls)$/i, "");
 }
 
-// Borra la hoja si existe y la vuelve a crear vacia (cada ejecucion parte de cero)
+// Borra la hoja si existe y la vuelve a crear vacia (cada ejecucion parte de cero).
+// OJO al orden: se CREA primero la hoja nueva (nombre temporal) y se borra despues la
+// antigua. Si se borrara primero y fuese la unica hoja visible del libro, la API de
+// Office Scripts lanzaria un error en runtime ("cannot delete the only visible sheet").
 function recrear(wb: ExcelScript.Workbook, name: string): ExcelScript.Worksheet {
+  let nueva = wb.addWorksheet();
   let ex = wb.getWorksheet(name);
   if (ex) { ex.delete(); }
-  return wb.addWorksheet(name);
+  nueva.setName(name);
+  return nueva;
 }
 
 function r2(x: number): number { return Math.round(x * 100) / 100; }
