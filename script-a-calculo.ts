@@ -2,27 +2,31 @@
 // SCRIPT A — CÁLCULO DEL COMPARADOR DE OFERTAS (solo números, sin formato)
 // =====================================================================================
 // Recibe `ofertasJson` desde Power Automate y genera CUATRO hojas con SOLO valores:
-//   1. "Resumen ofertas"       → totales PEC, desviaciones, aviso PEM/PEC y avisos de
-//                                descuadre entre hojas
-//   2. "Resumen capitulos"     → importes por capítulo padre y desviaciones vs media
-//   3. "Resumen agrupado"      → capítulos agrupados por oficios (tabla editable)
-//   4. "Comparativa partidas"  → una fila por partida/capítulo con precios e importes
+//   1. "Resumen ofertas"       → PEC total por oferta, desviaciones y aviso PEM/PEC
+//   2. "Resumen capitulos"     → capitulos padre con su importe oficial + aviso de cuadre
+//   3. "Resumen agrupado"      → capitulos padre agrupados por oficios (tabla editable)
+//   4. "Comparativa partidas"  → una fila por capitulo/subcapitulo/partida, orden original
 //
 // Este script NO aplica colores, ni merges, ni anchos, ni paneles inmovilizados.
 // De la estética se encarga el SCRIPT B (formato), que se ejecuta después.
 //
 // -------------------------------------------------------------------------------------
-// VALIDACIÓN CRÍTICA DE CUADRE
+// CRITERIO MAESTRO (aplica en TODAS las hojas de importes)
 // -------------------------------------------------------------------------------------
-// Para cada oferta se comprueba que coinciden (con una tolerancia configurable):
-//   T1 = total PEC (suma de todas las partidas)            → "Resumen ofertas"
-//   T2 = suma de todos los capítulos padre                 → "Resumen capitulos"
-//   T3 = suma de todos los grupos de oficios               → "Resumen agrupado"
-//   T4 = suma de partidas únicas de la comparativa         → "Comparativa partidas"
-// Cualquier descuadre genera una fila "AVISO ..." al final de "Resumen ofertas".
-// Además, los capítulos que no estén en la tabla de grupos NO se pierden: van a un
-// grupo automático "Sin clasificar (revisar)" y se avisa en "Resumen agrupado".
-// Un capítulo repetido en dos grupos también genera aviso (se cuenta solo en el 1º).
+//  1. Un capitulo PADRE es una fila con tipo:"capitulo" y nivel:"padre". Su importe es
+//     SIEMPRE el de su propia fila: es el valor oficial declarado por la constructora
+//     y ese numero manda.
+//  2. Cada partida y cada subcapitulo pertenece al ULTIMO capitulo padre que aparecio
+//     por encima en el ORDEN ORIGINAL (por POSICION, no por su codigo). Los codigos
+//     pueden estar mal, repetidos o sin criterio: da igual, manda el orden de origen.
+//     (Por eso ya NO existe la antigua tabla de excepciones por codigo: sobra.)
+//  3. TOTAL PEC de una oferta = suma de los importes de las filas de sus capitulos
+//     padre. Cuadra siempre por construccion.
+//  4. COMPROBACION (no manda, solo avisa): por cada capitulo padre se suman los
+//     importes de sus partidas. Si esa suma no casa con el importe de la fila del
+//     capitulo (tolerancia configurable), se marca el capitulo con una "X" en la
+//     columna "Aviso" de "Resumen capitulos". El importe usado sigue siendo SIEMPRE
+//     el de la fila del capitulo, nunca el de las partidas.
 //
 // -------------------------------------------------------------------------------------
 // CONTRATO ENTRE SCRIPT A Y SCRIPT B
@@ -38,13 +42,18 @@
 //   RES_NUM_COLS, RES_COL_EMPRESA, RES_COL_PEM, RES_COL_PEC, RES_COL_DIF_ECO_EUR,
 //   RES_COL_DIF_ECO_PCT, RES_COL_DIF_MED_EUR, RES_COL_DIF_MED_PCT, RES_COL_AVISO
 //   CAP_HEADER_FILAS, CAP_NUM_CAPITULOS, CAP_FILA_TOTAL, CAP_NUM_COLS, CAP_COLS_FIJAS,
-//   CAP_COL_COD, CAP_COL_NOMBRE, CAP_COL_MEDIA, CAP_COL_PRIMERA_OFERTA, CAP_COLS_POR_OFERTA
+//   CAP_COL_COD, CAP_COL_NOMBRE, CAP_COL_MEDIA, CAP_COL_PRIMERA_OFERTA,
+//   CAP_COLS_POR_OFERTA, CAP_COL_AVISO (columna "X" de cuadre, al final)
 //   AGR_HEADER_FILAS, AGR_NUM_GRUPOS, AGR_FILA_TOTAL, AGR_FILA_AVISO_INI, AGR_NUM_AVISOS,
 //   AGR_NUM_COLS, AGR_COLS_FIJAS, AGR_COL_GRUPO, AGR_COL_CAPS, AGR_COL_MEDIA,
 //   AGR_COL_PRIMERA_OFERTA, AGR_COLS_POR_OFERTA
-//   PART_HEADER_FILAS, PART_NUM_FILAS, PART_NUM_COLS, PART_COLS_FIJAS, PART_COL_CODIGO,
+//   PART_HEADER_FILAS, PART_NUM_FILAS, PART_NUM_COLS, PART_COLS_FIJAS,
+//   PART_COL_MARCA (columna "X" de codigos repetidos, al inicio), PART_COL_CODIGO,
 //   PART_COL_TIPO, PART_COL_RESUMEN, PART_COL_UD, PART_COL_MEDICION,
 //   PART_COL_PRIMERA_OFERTA, PART_COLS_POR_OFERTA, PART_COL_MAS_BARATA, PART_COL_DESV
+//
+// El Script B actual (v2) funciona sin cambios: lee todos los indices del contrato,
+// asi que el desplazamiento de columnas por la nueva columna de marca es transparente.
 //
 // -------------------------------------------------------------------------------------
 // RESTRICCIONES DEL RUNTIME (Office Scripts desde Power Automate)
@@ -59,7 +68,7 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
   // ===================================================================================
   // ZONA DE CONFIGURACIÓN (editable)
   // ===================================================================================
-  // Nombres de las hojas de salida (el Script B los lee del contrato, no hay que tocarlo)
+  // Nombres de las hojas de salida (el Script B los lee del contrato)
   const HOJA_RESUMEN = "Resumen ofertas";
   const HOJA_CAPITULOS = "Resumen capitulos";
   const HOJA_AGRUPADO = "Resumen agrupado";
@@ -68,12 +77,18 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
 
   // Umbral de anomalía PEM/PEC: si el total de una oferta está más de este porcentaje
   // POR DEBAJO de la media, se avisa (suele indicar oferta en PEM sin convertir a PEC).
-  // 0.20 = 20 %. Es una red de seguridad, NO una garantía: verificar siempre a mano.
+  // 0.20 = 20 %. Red de seguridad, NO garantía: verificar siempre a mano.
   const UMBRAL_ANOMALIA_PEM = 0.20;
 
-  // Tolerancia (en €) para las comprobaciones de cuadre entre hojas. Cubre los céntimos
-  // de redondeo; cualquier descuadre real (partidas o capítulos perdidos) es mucho mayor.
+  // Tolerancia (€) de la comprobación por capítulo: |suma de partidas − importe de la
+  // fila del capítulo| mayor que esto → "X" en la columna Aviso de "Resumen capitulos".
+  const TOLERANCIA_CUADRE_CAPITULO = 1.0;
+
+  // Tolerancia (€) de la validación de grupos: |suma de grupos − TOTAL PEC| mayor que
+  // esto → fila de AVISO en "Resumen agrupado". Cubre céntimos de redondeo.
   const TOLERANCIA_DESCUADRE = 1.0;
+
+  // (Los colores se configuran en el Script B, que es quien pinta.)
 
   // ===================================================================================
   // VALIDACIÓN DE ENTRADA
@@ -99,24 +114,26 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
   const N = nombres.length;
 
   // ===================================================================================
-  // AGREGACIÓN DE DATOS
+  // AGREGACIÓN DE DATOS (criterio maestro: por POSICIÓN, el importe del padre manda)
   // ===================================================================================
-  //  - orden / info: union de todos los codigos (capitulos y partidas) en el orden en
-  //    que aparecen por primera vez (respeta el orden original del presupuesto).
-  //  - precioMap / importeMap: por oferta, precio unitario e importe de cada codigo.
-  //  - capOrden / capNombre / capImporte: capitulos PADRE deducidos y sus importes.
-  //  - totalPEC: suma de importes de todas las partidas de cada oferta.
-  let orden: string[] = [];
-  let seen: { [c: string]: boolean } = {};
-  let info: { [c: string]: CodeInfo } = {};
-  let precioMap: { [c: string]: number }[] = [];
-  let importeMap: { [c: string]: number }[] = [];
+  // Para la comparativa, cada fila se identifica con una CLAVE = tipo + codigo + numero
+  // de ocurrencia dentro de la oferta. Asi, si un codigo se repite dentro de una misma
+  // oferta, cada aparicion conserva su propia fila en su posicion de origen, y las
+  // apariciones n-esimas de cada oferta se alinean entre si.
+  let orden: string[] = [];                          // claves en orden de 1a aparicion
+  let seen: { [k: string]: boolean } = {};
+  let info: { [k: string]: CodeInfo } = {};
+  let precioMap: { [k: string]: number }[] = [];     // por oferta: clave → precio unit
+  let importeMap: { [k: string]: number }[] = [];    // por oferta: clave → importe
+  let dupPartida: { [cod: string]: boolean } = {};   // codigos de partida repetidos en alguna oferta
 
-  let capOrden: string[] = [];
+  let capOrden: string[] = [];                       // codigos de capitulos PADRE
   let capSeen: { [c: string]: boolean } = {};
   let capNombre: { [c: string]: string } = {};
-  let capImporte: { [c: string]: number }[] = [];
-  let totalPEC: number[] = [];
+  let capImporte: { [c: string]: number }[] = [];    // por oferta: padre → importe de SU fila
+  let sumaPartidas: { [c: string]: number }[] = [];  // por oferta: padre → suma de sus partidas
+  let totalPEC: number[] = [];                       // por oferta: suma de filas padre
+  let avisosDatos: string[] = [];                    // avisos de integridad de datos
 
   for (let k = 0; k < N; k++) {
     let o = ofertas[k];
@@ -124,104 +141,131 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
     if (fs.length === 0) {
       throw new Error("La oferta \"" + nombres[k] + "\" no contiene filas. Revisa su Excel de origen.");
     }
-    let pM: { [c: string]: number } = {};
-    let iM: { [c: string]: number } = {};
-    let cM: { [c: string]: number } = {};
-    let tot = 0;
-    // Capitulo padre "en curso": se actualiza cada vez que aparece una fila de capitulo.
-    let padreActual = "";
+    let pM: { [key: string]: number } = {};
+    let iM: { [key: string]: number } = {};
+    let cImp: { [c: string]: number } = {};
+    let sPart: { [c: string]: number } = {};
+    let occCap: { [c: string]: number } = {};   // ocurrencias de codigos de capitulo
+    let occPar: { [c: string]: number } = {};   // ocurrencias de codigos de partida
+    let padreActual = "";                        // ultimo capitulo PADRE visto (posicion)
+    let huerfanas = 0;                           // importe de partidas antes del 1er padre
 
     for (let j = 0; j < fs.length; j++) {
       let f = fs[j];
+      let cod = f.codigo ? f.codigo.toString().trim() : "";
+      let res = f.resumen ? f.resumen.toString() : "";
 
       if (f.tipo === "capitulo") {
-        // Los capitulos padre se llaman "Capitulo" y los subcapitulos "Subcapitulo"
-        // (asi el Script B puede darles formato distinto leyendo la columna Tipo).
+        // ----- Fila de capitulo (padre o subcapitulo) -----
+        let nOcc = occCap[cod] === undefined ? 0 : occCap[cod];
+        occCap[cod] = nOcc + 1;
+        let clave = "C|" + cod + "|" + nOcc;
         let etiqueta = f.nivel === "padre" ? "Capitulo" : "Subcapitulo";
-        if (!seen[f.codigo]) {
-          seen[f.codigo] = true;
-          orden.push(f.codigo);
-          info[f.codigo] = { tipo: etiqueta, resumen: f.resumen, unidad: "", medicion: 0 };
+        if (!seen[clave]) {
+          seen[clave] = true;
+          orden.push(clave);
+          info[clave] = { codigo: cod, tipo: etiqueta, resumen: res, unidad: "", medicion: 0 };
         }
-        if (iM[f.codigo] === undefined) { iM[f.codigo] = f.importe; }
-        // Deducir el capitulo PADRE logico a partir del codigo
-        padreActual = capituloPadre(f.codigo);
-        if (!capSeen[padreActual]) {
-          capSeen[padreActual] = true;
-          capOrden.push(padreActual);
-          capNombre[padreActual] = f.resumen;
-        } else if (f.codigo === padreActual || capNombre[padreActual] === "") {
-          // Si aparece la fila del propio padre, su resumen manda sobre el del primer sub
-          capNombre[padreActual] = f.resumen;
+        if (iM[clave] === undefined) { iM[clave] = f.importe; }
+
+        if (f.nivel === "padre") {
+          // El importe oficial del capitulo padre es el de ESTA fila.
+          padreActual = cod;
+          if (!capSeen[cod]) { capSeen[cod] = true; capOrden.push(cod); capNombre[cod] = res; }
+          if (cImp[cod] === undefined) {
+            cImp[cod] = f.importe;
+          } else {
+            // Padre repetido dentro de la misma oferta: se usa la primera fila y se avisa.
+            avisosDatos.push("AVISO " + nombres[k] + ": el capitulo padre " + cod + " aparece mas de una vez; se usa el importe de su primera fila (" + r2(cImp[cod]) + " EUR).");
+          }
         }
+        // Los subcapitulos NO se suman a nada: su detalle ya esta en las partidas y el
+        // total oficial lo da la fila del padre.
         continue;
       }
 
-      // ------- Fila de partida -------
-      if (!seen[f.codigo]) {
-        seen[f.codigo] = true;
-        orden.push(f.codigo);
-        // Nota: la medicion se toma de la PRIMERA oferta donde aparece la partida.
-        info[f.codigo] = { tipo: "Partida", resumen: f.resumen, unidad: f.unidad, medicion: f.medicion };
+      // ----- Fila de partida -----
+      let nOccP = occPar[cod] === undefined ? 0 : occPar[cod];
+      occPar[cod] = nOccP + 1;
+      if (nOccP >= 1) { dupPartida[cod] = true; } // codigo repetido dentro de ESTA oferta
+      let claveP = "P|" + cod + "|" + nOccP;
+      if (!seen[claveP]) {
+        seen[claveP] = true;
+        orden.push(claveP);
+        // Nota: resumen/unidad/medicion se toman de la PRIMERA oferta donde aparece.
+        info[claveP] = { codigo: cod, tipo: "Partida", resumen: res, unidad: f.unidad, medicion: f.medicion };
       }
-      if (pM[f.codigo] === undefined) { pM[f.codigo] = f.precio; iM[f.codigo] = f.importe; }
+      if (pM[claveP] === undefined) { pM[claveP] = f.precio; iM[claveP] = f.importe; }
 
-      // Capitulo padre de la partida: normalmente el del ultimo capitulo visto (las filas
-      // vienen en orden). Si aun no ha aparecido ningun capitulo, se deduce del codigo
-      // de la propia partida como red de seguridad.
-      let padre = padreActual !== "" ? padreActual : capituloPadre(f.codigo);
-      if (padre !== "") {
-        if (!capSeen[padre]) { capSeen[padre] = true; capOrden.push(padre); capNombre[padre] = ""; }
-        cM[padre] = (cM[padre] || 0) + f.importe;
+      // Pertenencia por POSICION: la partida cuelga del ultimo padre visto por encima.
+      if (padreActual !== "") {
+        sPart[padreActual] = (sPart[padreActual] || 0) + f.importe;
+      } else {
+        huerfanas += f.importe;
       }
-      tot += f.importe;
+    }
+
+    if (huerfanas > TOLERANCIA_CUADRE_CAPITULO) {
+      avisosDatos.push("AVISO " + nombres[k] + ": hay partidas ANTES del primer capitulo padre por " + r2(huerfanas) + " EUR; no cuentan en el PEC de ningun capitulo. Revisa el Excel de origen.");
+    }
+
+    // TOTAL PEC de la oferta = suma de los importes de las filas de capitulos padre
+    let tot = 0;
+    for (let c = 0; c < capOrden.length; c++) {
+      if (cImp[capOrden[c]] !== undefined) { tot += cImp[capOrden[c]]; }
     }
 
     precioMap.push(pM);
     importeMap.push(iM);
-    capImporte.push(cM);
+    capImporte.push(cImp);
+    sumaPartidas.push(sPart);
     totalPEC.push(tot);
   }
 
   // ===================================================================================
-  // AGRUPACIÓN POR OFICIOS + VALIDACIÓN DE CUADRE ENTRE HOJAS
+  // COMPROBACIÓN POR CAPÍTULO (no manda, solo avisa): partidas vs fila del padre
+  // ===================================================================================
+  // avisoCap[cap] = nombres de las ofertas donde la suma de partidas del capitulo no
+  // casa con el importe de su fila (fuera de tolerancia).
+  let avisoCap: { [c: string]: string[] } = {};
+  for (let c = 0; c < capOrden.length; c++) {
+    let cap = capOrden[c];
+    let lista: string[] = [];
+    for (let i = 0; i < N; i++) {
+      if (capImporte[i][cap] === undefined) { continue; }
+      let sp = sumaPartidas[i][cap] === undefined ? 0 : sumaPartidas[i][cap];
+      if (Math.abs(sp - capImporte[i][cap]) > TOLERANCIA_CUADRE_CAPITULO) {
+        lista.push(nombres[i]);
+      }
+    }
+    avisoCap[cap] = lista;
+  }
+
+  // ===================================================================================
+  // AGRUPACIÓN POR OFICIOS + VALIDACIÓN CRÍTICA (grupos vs TOTAL PEC)
   // ===================================================================================
   let agr = calcularAgrupado(capOrden, capImporte, N);
 
-  // T1..T4: los cuatro totales que DEBEN coincidir por oferta (ver cabecera del script)
-  let avisosTotales: string[] = [];
+  // Los avisos de integridad de datos tambien se muestran en "Resumen agrupado"
+  for (let a = 0; a < avisosDatos.length; a++) { agr.avisos.push(avisosDatos[a]); }
+
+  // Doble red: ademas de la garantia estructural (todo padre cae en un grupo, aunque
+  // sea en "SIN CLASIFICAR"), se comprueba numericamente que grupos = PEC por oferta.
   for (let i = 0; i < N; i++) {
-    let t1 = totalPEC[i];
-    let t2 = 0;
-    for (let c = 0; c < capOrden.length; c++) {
-      if (capImporte[i][capOrden[c]] !== undefined) { t2 += capImporte[i][capOrden[c]]; }
-    }
-    let t3 = 0;
-    for (let g = 0; g < agr.grupos.length; g++) { t3 += agr.sumas[g][i]; }
-    let t4 = 0;
-    for (let r = 0; r < orden.length; r++) {
-      if (info[orden[r]].tipo === "Partida" && importeMap[i][orden[r]] !== undefined) {
-        t4 += importeMap[i][orden[r]];
-      }
-    }
-    if (Math.abs(t2 - t1) > TOLERANCIA_DESCUADRE) {
-      avisosTotales.push("AVISO " + nombres[i] + ": la suma de capitulos (" + r2(t2) + " EUR) no coincide con el total PEC (" + r2(t1) + " EUR). Diferencia: " + r2(t2 - t1) + " EUR. Puede haber partidas sin capitulo asignado.");
-    }
-    if (Math.abs(t3 - t2) > TOLERANCIA_DESCUADRE) {
-      avisosTotales.push("AVISO " + nombres[i] + ": la suma de grupos (" + r2(t3) + " EUR) no coincide con la suma de capitulos (" + r2(t2) + " EUR). Diferencia: " + r2(t3 - t2) + " EUR. Revisa la tabla de grupos.");
-    }
-    if (Math.abs(t4 - t1) > TOLERANCIA_DESCUADRE) {
-      avisosTotales.push("AVISO " + nombres[i] + ": la suma de partidas de la comparativa (" + r2(t4) + " EUR) no coincide con el total PEC (" + r2(t1) + " EUR). Diferencia: " + r2(t4 - t1) + " EUR. Hay codigos de partida repetidos dentro de la oferta (la comparativa solo muestra la primera aparicion).");
+    let tG = 0;
+    for (let g = 0; g < agr.grupos.length; g++) { tG += agr.sumas[g][i]; }
+    if (Math.abs(tG - totalPEC[i]) > TOLERANCIA_DESCUADRE) {
+      agr.avisos.push("AVISO " + nombres[i] + ": la suma de grupos (" + r2(tG) + " EUR) no coincide con el TOTAL PEC (" + r2(totalPEC[i]) + " EUR). Diferencia: " + r2(tG - totalPEC[i]) + " EUR. Revisa la tabla de grupos.");
     }
   }
 
   // ===================================================================================
   // ESCRITURA DE LAS CUATRO HOJAS (solo valores) + CONTRATO
   // ===================================================================================
-  let layR = hojaResumenA(workbook, HOJA_RESUMEN, nombres, totalPEC, UMBRAL_ANOMALIA_PEM, avisosTotales);
-  let layC = hojaCapitulosA(workbook, HOJA_CAPITULOS, nombres, capOrden, capNombre, capImporte);
+  let layR = hojaResumenA(workbook, HOJA_RESUMEN, nombres, totalPEC, UMBRAL_ANOMALIA_PEM);
+  let layC = hojaCapitulosA(workbook, HOJA_CAPITULOS, nombres, capOrden, capNombre, capImporte, avisoCap);
   let layG = hojaAgrupadoA(workbook, HOJA_AGRUPADO, nombres, agr);
-  let layP = hojaPartidasA(workbook, HOJA_PARTIDAS, nombres, orden, info, precioMap, importeMap);
+  let layP = hojaPartidasA(workbook, HOJA_PARTIDAS, nombres, orden, info, precioMap, importeMap, dupPartida);
 
   escribirContrato(workbook, HOJA_CONTRATO, HOJA_RESUMEN, HOJA_CAPITULOS, HOJA_AGRUPADO,
     HOJA_PARTIDAS, nombres, layR, layC, layG, layP);
@@ -230,77 +274,35 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
 // =====================================================================================
 // TABLA DE GRUPOS (OFICIOS) — ¡¡CRITERIO DEL USUARIO, VERIFICAR EN CADA PROYECTO!!
 // =====================================================================================
-// Cada grupo suma los capitulos indicados. Los capitulos del proyecto que NO aparezcan
-// aqui NO se pierden: van automaticamente al grupo "Sin clasificar (revisar)" y se
-// genera un AVISO para que decidas donde colocarlos (p. ej. C05, C30, C45, C49...).
+// Cada grupo suma los IMPORTES DE FILA de los capitulos padre indicados. Los padres del
+// proyecto que NO aparezcan aqui NO se pierden: van automaticamente al grupo
+// "SIN CLASIFICAR (REVISAR)" y se genera un AVISO (asi el total siempre cuadra y el
+// descuadre nunca pasa en silencio). Nota: ya no deberia aparecer un C49 padre (ahora
+// es subcapitulo dentro de C13), pero si apareciera cualquier padre no listado, caera
+// en SIN CLASIFICAR y en el aviso.
 // Para editar: anade/quita g.push({ nombre: "...", capitulos: ["Cxx", ...] });
 function tablaGrupos(): Grupo[] {
   let g: Grupo[] = [];
-  g.push({ nombre: "Estructuras", capitulos: ["C01", "C02", "C03", "C04"] });
-  g.push({ nombre: "Obra sucia", capitulos: ["C06", "C07", "C08"] });
-  g.push({ nombre: "Carpintería y Cerrajería", capitulos: ["C09", "C10", "C11"] });
-  g.push({ nombre: "Pinturas", capitulos: ["C12"] });
-  g.push({ nombre: "Urbanización", capitulos: ["C13", "C14"] });
-  g.push({ nombre: "Varios", capitulos: ["C15"] });
-  // Instalaciones: C16 + todos los capitulos de C31 a C44 (ambos incluidos)
-  let inst: string[] = ["C16"];
-  for (let n = 31; n <= 44; n++) { inst.push("C" + String(n)); }
-  g.push({ nombre: "Instalaciones", capitulos: inst });
-  g.push({ nombre: "Cierre", capitulos: ["C46", "C47"] });
+  g.push({ nombre: "ESTRUCTURAS", capitulos: ["C01", "C02", "C03", "C04"] });
+  g.push({ nombre: "OBRA SUCIA", capitulos: ["C05", "C06", "C07", "C08"] });
+  g.push({ nombre: "CARPINTERÍA Y CERRAJERÍA", capitulos: ["C09", "C10", "C11"] });
+  g.push({ nombre: "PINTURAS", capitulos: ["C12"] });
+  g.push({ nombre: "URBANIZACIÓN", capitulos: ["C13", "C14"] });
+  g.push({ nombre: "VARIOS", capitulos: ["C15"] });
+  g.push({ nombre: "INSTALACIONES", capitulos: ["C16", "C30", "C31", "C32", "C33", "C38", "C39", "C40", "C41", "C43", "C44"] });
+  g.push({ nombre: "CONTROL DE CALIDAD", capitulos: ["C45"] });
+  g.push({ nombre: "SEGURIDAD Y SALUD", capitulos: ["C46"] });
+  g.push({ nombre: "GESTIÓN DE RESIDUOS", capitulos: ["C47"] });
   return g;
-}
-
-// =====================================================================================
-// TABLA DE EXCEPCIONES DE CAPÍTULO — ¡¡CRITERIO DEL USUARIO, VERIFICAR EN CADA PROYECTO!!
-// =====================================================================================
-// Algunos codigos no revelan su capitulo padre real. Esta tabla mapea el primer token
-// numerico del codigo a un capitulo concreto:
-//   - Telecomunicaciones: codigos que empiezan por 1., 2., 3. o 4  →  C33
-//   - Aparatos sanitarios: codigos que empiezan por 23             →  C16
-// Para anadir una excepcion: t.push({ token: "XX", capitulo: "Cnn" });
-function tablaExcepciones(): ExcepcionCapitulo[] {
-  let t: ExcepcionCapitulo[] = [];
-  t.push({ token: "1", capitulo: "C33" });  // telecomunicaciones
-  t.push({ token: "2", capitulo: "C33" });  // telecomunicaciones
-  t.push({ token: "3", capitulo: "C33" });  // telecomunicaciones
-  t.push({ token: "4", capitulo: "C33" });  // telecomunicaciones
-  t.push({ token: "23", capitulo: "C16" }); // aparatos sanitarios
-  return t;
-}
-
-function excepcion(token: string): string {
-  let t = tablaExcepciones();
-  for (let i = 0; i < t.length; i++) {
-    if (t[i].token === token) { return t[i].capitulo; }
-  }
-  return "";
-}
-
-// Deduce el capitulo padre "Cnn" a partir de un codigo.
-// Patrones observados: F2_Cnn... | F2_nn.... | Cnn... | nn. | nn  →  "Cnn"
-// Si ningun patron encaja, devuelve el codigo tal cual (se agrupa bajo si mismo).
-function capituloPadre(code: string): string {
-  let c = code.trim();
-  let m = c.match(/^F2[_\- ]?C0*(\d{1,2})/i);
-  if (m) { return "C" + pad2(m[1]); }
-  m = c.match(/^F2[_\- ]?(\d{1,2})[.]/i);
-  if (m) { return "C" + pad2(m[1]); }
-  m = c.match(/^C(\d{2})/i);
-  if (m) { return "C" + m[1]; }
-  m = c.match(/^(\d{1,2})[.]/);
-  if (m) { let e = excepcion(m[1]); return e !== "" ? e : "C" + pad2(m[1]); }
-  m = c.match(/^(\d{1,2})$/);
-  if (m) { let e = excepcion(m[1]); return e !== "" ? e : "C" + pad2(m[1]); }
-  return c;
 }
 
 // =====================================================================================
 // CÁLCULO DE LA AGRUPACIÓN POR OFICIOS
 // =====================================================================================
-// Reparte cada capitulo padre en su grupo. Garantias para que el cuadre NUNCA falle:
+// Garantias para que el aviso NUNCA falle en detectar un descuadre:
 //  - Capitulo repetido en dos grupos → se cuenta SOLO en el primero + AVISO.
-//  - Capitulo presente en las ofertas pero ausente de la tabla → grupo automatico
-//    "Sin clasificar (revisar)" + AVISO. Asi la suma de grupos siempre es completa.
+//  - Capitulo padre presente en las ofertas pero ausente de la tabla → grupo automatico
+//    "SIN CLASIFICAR (REVISAR)" + AVISO con los codigos y el importe afectado.
 function calcularAgrupado(capOrden: string[], capImporte: { [c: string]: number }[], N: number): AgrupadoCalc {
   let base = tablaGrupos();
   let capGrupo: { [c: string]: number } = {};
@@ -317,7 +319,7 @@ function calcularAgrupado(capOrden: string[], capImporte: { [c: string]: number 
     }
   }
 
-  // Capitulos presentes en las ofertas que no estan en ningun grupo de la tabla
+  // Capitulos padre presentes en las ofertas que no estan en ningun grupo de la tabla
   let sinGrupo: string[] = [];
   for (let c = 0; c < capOrden.length; c++) {
     if (capGrupo[capOrden[c]] === undefined) {
@@ -329,8 +331,7 @@ function calcularAgrupado(capOrden: string[], capImporte: { [c: string]: number 
   let grupos: Grupo[] = [];
   for (let g = 0; g < base.length; g++) { grupos.push(base[g]); }
   if (sinGrupo.length > 0) {
-    grupos.push({ nombre: "Sin clasificar (revisar)", capitulos: sinGrupo });
-    avisos.push("AVISO: capitulos fuera de la tabla de grupos: " + sinGrupo.join(", ") + ". Se han sumado en el grupo \"Sin clasificar (revisar)\" para que el total cuadre. Revisa la tabla de grupos del Script A.");
+    grupos.push({ nombre: "SIN CLASIFICAR (REVISAR)", capitulos: sinGrupo });
   }
 
   // Sumas por grupo y oferta (valores brutos; se redondea al escribir)
@@ -354,6 +355,16 @@ function calcularAgrupado(capOrden: string[], capImporte: { [c: string]: number 
     }
   }
 
+  // Aviso de sin clasificar con el importe afectado (el mayor entre las ofertas)
+  if (sinGrupo.length > 0) {
+    let idxAuto = grupos.length - 1;
+    let maxImporte = 0;
+    for (let i = 0; i < N; i++) {
+      if (sumas[idxAuto][i] > maxImporte) { maxImporte = sumas[idxAuto][i]; }
+    }
+    avisos.push("AVISO: capitulos padre fuera de la tabla de grupos: " + sinGrupo.join(", ") + ". Se han sumado en \"SIN CLASIFICAR (REVISAR)\" (hasta " + r2(maxImporte) + " EUR por oferta) para que el total cuadre. Revisa la tabla de grupos del Script A.");
+  }
+
   return { grupos: grupos, sumas: sumas, presencia: presencia, avisos: avisos };
 }
 
@@ -362,9 +373,9 @@ function calcularAgrupado(capOrden: string[], capImporte: { [c: string]: number 
 // =====================================================================================
 // Estructura (0-based):
 //   Fila 0: cabecera | Filas 1..N: ofertas | N+1: blanco | N+2..N+4: economica, media,
-//   horquilla | (si hay avisos de cuadre) blanco + una fila de AVISO por descuadre
+//   horquilla. El PEC de cada oferta es la suma de sus filas de capitulos padre.
 function hojaResumenA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: string[],
-  totalPEC: number[], umbralAnomalia: number, avisosTotales: string[]): LayoutResumen {
+  totalPEC: number[], umbralAnomalia: number): LayoutResumen {
 
   let ws = recrear(wb, nombreHoja);
   const N = nombres.length;
@@ -411,40 +422,37 @@ function hojaResumenA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: str
   filas.push(["Media " + N + " ofertas", "", r2(media), "", "", "", "", ""]);
   filas.push(["Horquilla (máx − mín)", "", r2(mx - mn), "", "", "", "", ""]);
 
-  // Avisos de descuadre entre hojas (la validacion mas importante del script)
-  let filaAvisoIni = 0;
-  if (avisosTotales.length > 0) {
-    filas.push(["", "", "", "", "", "", "", ""]);
-    filaAvisoIni = filas.length;
-    for (let a = 0; a < avisosTotales.length; a++) {
-      filas.push([avisosTotales[a], "", "", "", "", "", "", ""]);
-    }
-  }
-
   ws.getRangeByIndexes(0, 0, filas.length, COLS).setValues(filas);
-  return { filaResumenIni: filaResumenIni, filaAvisoIni: filaAvisoIni, numAvisos: avisosTotales.length, numCols: COLS };
+  return { filaResumenIni: filaResumenIni, numCols: COLS };
 }
 
 // =====================================================================================
 // HOJA 2: "Resumen capitulos" (solo valores, SIN columna PEM)
 // =====================================================================================
+// Solo capitulos PADRE. El importe de cada oferta es el de la FILA del capitulo
+// (criterio maestro), nunca la suma de partidas.
 // Estructura (0-based):
 //   Fila 0: nombres de empresa (primera columna de su bloque; B hace el merge)
 //   Fila 1: cabecera | Filas 2..: capitulos padre | Ultima fila: TOTAL PEC
-// Columnas: 0=Cod, 1=Capitulo, 2=Media PEC, luego 3 por oferta (Importe, Δ€, Δ%)
+// Columnas: 0=Cod, 1=Capitulo, 2=Media PEC, luego 3 por oferta (Importe, Δ€, Δ%),
+//           y al FINAL una columna "Aviso" con "X" donde las partidas no casan con
+//           la fila del capitulo (y entre parentesis, en que ofertas).
 function hojaCapitulosA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: string[],
   capOrden: string[], capNombre: { [c: string]: string },
-  capImporte: { [c: string]: number }[]): LayoutCapitulos {
+  capImporte: { [c: string]: number }[], avisoCap: { [c: string]: string[] }): LayoutCapitulos {
 
   let ws = recrear(wb, nombreHoja);
   const N = nombres.length;
   const COLS_FIJAS = 3;
-  const COLS = COLS_FIJAS + N * 3;
+  const COL_AVISO = COLS_FIJAS + N * 3;
+  const COLS = COL_AVISO + 1;
 
   let cab1: (string | number)[] = ["", "", ""];
   for (let i = 0; i < N; i++) { cab1.push(nombres[i]); cab1.push(""); cab1.push(""); }
+  cab1.push("");
   let cab2: (string | number)[] = ["Cód.", "Capítulo", "Media PEC"];
   for (let i = 0; i < N; i++) { cab2.push("Importe PEC"); cab2.push("Δ € s/Media"); cab2.push("Δ % s/Media"); }
+  cab2.push("Aviso");
 
   let filas: (string | number)[][] = [];
   filas.push(cab1);
@@ -473,10 +481,13 @@ function hojaCapitulosA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: s
         fila.push(""); fila.push(""); fila.push("");
       }
     }
+    // "X" si en alguna oferta la suma de partidas no casa con la fila del capitulo
+    let lista = avisoCap[cap] ? avisoCap[cap] : [];
+    fila.push(lista.length > 0 ? "X (" + lista.join(", ") + ")" : "");
     filas.push(fila);
   }
 
-  // Fila TOTAL PEC
+  // Fila TOTAL PEC (suma de filas de capitulos padre = PEC oficial)
   let mediaTot = 0;
   for (let i = 0; i < N; i++) { mediaTot += totCol[i]; }
   mediaTot = mediaTot / N;
@@ -487,18 +498,23 @@ function hojaCapitulosA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: s
     fT.push(r2(totCol[i] - mediaTot));
     fT.push(mediaTot > 0 ? r4((totCol[i] - mediaTot) / mediaTot) : 0);
   }
+  fT.push("");
   filas.push(fT);
 
   ws.getRangeByIndexes(0, 0, filas.length, COLS).setValues(filas);
-  return { numCapitulos: capOrden.length, filaTotal: filaTotal, numCols: COLS };
+  return { numCapitulos: capOrden.length, filaTotal: filaTotal, numCols: COLS, colAviso: COL_AVISO };
 }
 
 // =====================================================================================
-// HOJA 3: "Resumen agrupado" (NUEVA, solo valores)
+// HOJA 3: "Resumen agrupado" (solo valores)
 // =====================================================================================
+// Capitulos padre agrupados por oficios (titulos EN MAYUSCULAS). Cada grupo suma los
+// importes de FILA de sus capitulos padre. La suma de todos los grupos debe ser
+// identica al TOTAL PEC; cualquier padre fuera de la tabla cae en "SIN CLASIFICAR
+// (REVISAR)" y en una fila de AVISO.
 // Estructura (0-based):
-//   Fila 0: nombres de empresa | Fila 1: cabecera | Filas 2..: un grupo (oficio) por
-//   fila | fila TOTAL | (si hay avisos) blanco + filas de AVISO
+//   Fila 0: nombres de empresa | Fila 1: cabecera | Filas 2..: un grupo por fila |
+//   fila TOTAL | (si hay avisos) blanco + filas de AVISO
 // Columnas: 0=Grupo, 1=Capitulos que suma, 2=Media PEC, luego 3 por oferta
 function hojaAgrupadoA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: string[],
   agr: AgrupadoCalc): LayoutAgrupado {
@@ -544,7 +560,7 @@ function hojaAgrupadoA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: st
     filas.push(fila);
   }
 
-  // Fila TOTAL
+  // Fila TOTAL (= TOTAL PEC si la tabla de grupos esta bien)
   let mediaTot = 0;
   for (let i = 0; i < N; i++) { mediaTot += totCol[i]; }
   mediaTot = mediaTot / N;
@@ -557,7 +573,7 @@ function hojaAgrupadoA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: st
   }
   filas.push(fT);
 
-  // Avisos de la agrupacion (capitulos sin grupo o repetidos en dos grupos)
+  // Filas de AVISO (sin clasificar, duplicados, huerfanas, descuadres...)
   let filaAvisoIni = 0;
   if (agr.avisos.length > 0) {
     let vacia: (string | number)[] = [];
@@ -578,27 +594,31 @@ function hojaAgrupadoA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: st
 // =====================================================================================
 // HOJA 4: "Comparativa partidas" (solo valores)
 // =====================================================================================
+// Una fila por capitulo, subcapitulo y partida, EN ORDEN ORIGINAL. Los codigos
+// repetidos dentro de una misma oferta conservan cada uno su fila y su posicion; esas
+// filas de partida se marcan con "X" en la primera columna (solo aviso visual).
 // Estructura (0-based):
-//   Fila 0: titulo + nombres de empresa | Fila 1: cabecera | Filas 2..: capitulos y
-//   partidas en el orden original
-// Columnas fijas: 0=Codigo, 1=Tipo ("Capitulo"|"Subcapitulo"|"Partida"), 2=Resumen,
-//                 3=Ud, 4=Medicion. Luego 2 por oferta (P. Unit, Importe) y al final
-//                 Mas barata y Δ % (desviacion maxima entre ofertas).
+//   Fila 0: titulo + nombres de empresa | Fila 1: cabecera | Filas 2..: datos
+// Columnas fijas: 0=Aviso ("X" si codigo de partida repetido), 1=Codigo,
+//                 2=Tipo ("Capitulo"|"Subcapitulo"|"Partida"), 3=Resumen, 4=Ud,
+//                 5=Medicion. Luego 2 por oferta (P. Unit, Importe) y al final
+//                 Mas barata (por precio unitario) y Δ % (max vs min).
 function hojaPartidasA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: string[],
-  orden: string[], info: { [c: string]: CodeInfo },
-  precioMap: { [c: string]: number }[], importeMap: { [c: string]: number }[]): LayoutPartidas {
+  orden: string[], info: { [k: string]: CodeInfo },
+  precioMap: { [k: string]: number }[], importeMap: { [k: string]: number }[],
+  dupPartida: { [cod: string]: boolean }): LayoutPartidas {
 
   let ws = recrear(wb, nombreHoja);
   const N = nombres.length;
-  const FIX = 5;
+  const FIX = 6;
   const colBarata = FIX + N * 2;
   const colDesv = colBarata + 1;
   const COLS = colDesv + 1;
 
-  let cab1: (string | number)[] = ["COMPARATIVA POR PARTIDA", "", "", "", ""];
+  let cab1: (string | number)[] = ["COMPARATIVA POR PARTIDA", "", "", "", "", ""];
   for (let i = 0; i < N; i++) { cab1.push(nombres[i]); cab1.push(""); }
   cab1.push("COMPARACIÓN"); cab1.push("");
-  let cab2: (string | number)[] = ["Código", "Tipo", "Resumen", "Ud", "Medición"];
+  let cab2: (string | number)[] = ["Aviso", "Código", "Tipo", "Resumen", "Ud", "Medición"];
   for (let i = 0; i < N; i++) { cab2.push("P. Unit"); cab2.push("Importe"); }
   cab2.push("Más barata"); cab2.push("Δ %");
 
@@ -607,20 +627,23 @@ function hojaPartidasA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: st
   filas.push(cab2);
 
   for (let r = 0; r < orden.length; r++) {
-    let cod = orden[r];
-    let ci = info[cod];
+    let clave = orden[r];
+    let ci = info[clave];
     let esCap = ci.tipo !== "Partida";
 
-    let fila: (string | number)[] = [cod, ci.tipo, ci.resumen, ci.unidad, esCap ? "" : r2(ci.medicion)];
+    // Marca "X": solo partidas cuyo codigo se repite dentro de alguna oferta
+    let marca = (!esCap && dupPartida[ci.codigo]) ? "X" : "";
+
+    let fila: (string | number)[] = [marca, ci.codigo, ci.tipo, ci.resumen, ci.unidad, esCap ? "" : r2(ci.medicion)];
 
     // Valores a comparar: precios unitarios en partidas, importes en capitulos
     let vals: number[] = [];
     let idxs: number[] = [];
     for (let i = 0; i < N; i++) {
-      let tienePrecio = precioMap[i][cod] !== undefined;
-      let tieneImporte = importeMap[i][cod] !== undefined;
-      let pu = tienePrecio ? precioMap[i][cod] : 0;
-      let im = tieneImporte ? importeMap[i][cod] : 0;
+      let tienePrecio = precioMap[i][clave] !== undefined;
+      let tieneImporte = importeMap[i][clave] !== undefined;
+      let pu = tienePrecio ? precioMap[i][clave] : 0;
+      let im = tieneImporte ? importeMap[i][clave] : 0;
       if (esCap) {
         fila.push("");
         fila.push(tieneImporte ? r2(im) : "");
@@ -664,8 +687,8 @@ function escribirContrato(wb: ExcelScript.Workbook, nombreHoja: string,
   // --- "Resumen ofertas" ---
   pares.push(["RES_HEADER_FILAS", 1]);
   pares.push(["RES_FILA_RESUMEN_INI", layR.filaResumenIni]);
-  pares.push(["RES_FILA_AVISO_INI", layR.filaAvisoIni]);
-  pares.push(["RES_NUM_AVISOS", layR.numAvisos]);
+  pares.push(["RES_FILA_AVISO_INI", 0]);   // sin filas de aviso en esta hoja
+  pares.push(["RES_NUM_AVISOS", 0]);
   pares.push(["RES_NUM_COLS", layR.numCols]);
   pares.push(["RES_COL_EMPRESA", 0]);
   pares.push(["RES_COL_PEM", 1]);
@@ -676,7 +699,7 @@ function escribirContrato(wb: ExcelScript.Workbook, nombreHoja: string,
   pares.push(["RES_COL_DIF_MED_PCT", 6]);
   pares.push(["RES_COL_AVISO", 7]);
 
-  // --- "Resumen capitulos" (sin PEM) ---
+  // --- "Resumen capitulos" (sin PEM; con columna Aviso al final) ---
   pares.push(["CAP_HEADER_FILAS", 2]);
   pares.push(["CAP_NUM_CAPITULOS", layC.numCapitulos]);
   pares.push(["CAP_FILA_TOTAL", layC.filaTotal]);
@@ -687,6 +710,7 @@ function escribirContrato(wb: ExcelScript.Workbook, nombreHoja: string,
   pares.push(["CAP_COL_MEDIA", 2]);
   pares.push(["CAP_COL_PRIMERA_OFERTA", 3]);
   pares.push(["CAP_COLS_POR_OFERTA", 3]);
+  pares.push(["CAP_COL_AVISO", layC.colAviso]);
 
   // --- "Resumen agrupado" ---
   pares.push(["AGR_HEADER_FILAS", 2]);
@@ -702,17 +726,18 @@ function escribirContrato(wb: ExcelScript.Workbook, nombreHoja: string,
   pares.push(["AGR_COL_PRIMERA_OFERTA", 3]);
   pares.push(["AGR_COLS_POR_OFERTA", 3]);
 
-  // --- "Comparativa partidas" ---
+  // --- "Comparativa partidas" (con columna de marca "X" al inicio) ---
   pares.push(["PART_HEADER_FILAS", 2]);
   pares.push(["PART_NUM_FILAS", layP.numFilas]);
   pares.push(["PART_NUM_COLS", layP.numCols]);
-  pares.push(["PART_COLS_FIJAS", 5]);
-  pares.push(["PART_COL_CODIGO", 0]);
-  pares.push(["PART_COL_TIPO", 1]);
-  pares.push(["PART_COL_RESUMEN", 2]);
-  pares.push(["PART_COL_UD", 3]);
-  pares.push(["PART_COL_MEDICION", 4]);
-  pares.push(["PART_COL_PRIMERA_OFERTA", 5]);
+  pares.push(["PART_COLS_FIJAS", 6]);
+  pares.push(["PART_COL_MARCA", 0]);
+  pares.push(["PART_COL_CODIGO", 1]);
+  pares.push(["PART_COL_TIPO", 2]);
+  pares.push(["PART_COL_RESUMEN", 3]);
+  pares.push(["PART_COL_UD", 4]);
+  pares.push(["PART_COL_MEDICION", 5]);
+  pares.push(["PART_COL_PRIMERA_OFERTA", 6]);
   pares.push(["PART_COLS_POR_OFERTA", 2]);
   pares.push(["PART_COL_MAS_BARATA", layP.colMasBarata]);
   pares.push(["PART_COL_DESV", layP.colDesv]);
@@ -751,7 +776,6 @@ function recrear(wb: ExcelScript.Workbook, name: string): ExcelScript.Worksheet 
   return wb.addWorksheet(name);
 }
 
-function pad2(t: string): string { return t.length === 1 ? "0" + t : t; }
 function r2(x: number): number { return Math.round(x * 100) / 100; }
 function r4(x: number): number { return Math.round(x * 10000) / 10000; }
 
@@ -770,12 +794,11 @@ interface Fila {
   importe: number;
 }
 interface Oferta { nombre: string; filas: Fila[]; }
-interface CodeInfo { tipo: string; resumen: string; unidad: string; medicion: number; }
+interface CodeInfo { codigo: string; tipo: string; resumen: string; unidad: string; medicion: number; }
 interface Cmp { emp: string; pct: number; }
-interface ExcepcionCapitulo { token: string; capitulo: string; }
 interface Grupo { nombre: string; capitulos: string[]; }
 interface AgrupadoCalc { grupos: Grupo[]; sumas: number[][]; presencia: boolean[][]; avisos: string[]; }
-interface LayoutResumen { filaResumenIni: number; filaAvisoIni: number; numAvisos: number; numCols: number; }
-interface LayoutCapitulos { numCapitulos: number; filaTotal: number; numCols: number; }
+interface LayoutResumen { filaResumenIni: number; numCols: number; }
+interface LayoutCapitulos { numCapitulos: number; filaTotal: number; numCols: number; colAviso: number; }
 interface LayoutAgrupado { numGrupos: number; filaTotal: number; filaAvisoIni: number; numAvisos: number; numCols: number; }
 interface LayoutPartidas { numFilas: number; numCols: number; colMasBarata: number; colDesv: number; }
