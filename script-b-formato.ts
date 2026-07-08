@@ -448,31 +448,36 @@ function limpiarCondicionales(ws: ExcelScript.Worksheet) {
 
 // SEMÁFORO estandar: escala de 3 colores sobre UNA columna. El valor mas bajo en verde,
 // el mas alto en rojo, el percentil 50 en amarillo. Una sola llamada por columna.
+// OJO: el linter de Office Scripts prohibe guardar objetos de su API en variables
+// (aliasing), asi que TODO va encadenado en una sola expresion, sin variables intermedias.
 function escalaSemaforo(ws: ExcelScript.Worksheet, filaIni: number, col: number,
   numFilas: number, cfg: CfgB) {
   if (numFilas <= 0) { return; }
-  let rango = ws.getRangeByIndexes(filaIni, col, numFilas, 1);
-  let cf = rango.addConditionalFormat(ExcelScript.ConditionalFormatType.colorScale);
-  cf.getColorScale().setCriteria({
-    minimum: { color: cfg.escalaVerde, type: ExcelScript.ConditionalFormatColorCriterionType.lowestValue },
-    midpoint: { color: cfg.escalaAmarillo, formula: "50", type: ExcelScript.ConditionalFormatColorCriterionType.percentile },
-    maximum: { color: cfg.escalaRojo, type: ExcelScript.ConditionalFormatColorCriterionType.highestValue }
-  });
+  ws.getRangeByIndexes(filaIni, col, numFilas, 1)
+    .addConditionalFormat(ExcelScript.ConditionalFormatType.colorScale)
+    .getColorScale()
+    .setCriteria({
+      minimum: { color: cfg.escalaVerde, type: ExcelScript.ConditionalFormatColorCriterionType.lowestValue },
+      midpoint: { color: cfg.escalaAmarillo, formula: "50", type: ExcelScript.ConditionalFormatColorCriterionType.percentile },
+      maximum: { color: cfg.escalaRojo, type: ExcelScript.ConditionalFormatColorCriterionType.highestValue }
+    });
 }
 
 // SEMÁFORO para columnas de DESVIACIÓN: el punto amarillo se ancla en el valor 0
 // (la media), de modo que lo negativo (por debajo de media) tira a verde y lo positivo
 // (por encima de media) tira a rojo.
+// Igual que arriba: sin variables intermedias para no violar la regla de aliasing.
 function escalaDesviacion(ws: ExcelScript.Worksheet, filaIni: number, col: number,
   numFilas: number, cfg: CfgB) {
   if (numFilas <= 0) { return; }
-  let rango = ws.getRangeByIndexes(filaIni, col, numFilas, 1);
-  let cf = rango.addConditionalFormat(ExcelScript.ConditionalFormatType.colorScale);
-  cf.getColorScale().setCriteria({
-    minimum: { color: cfg.escalaVerde, type: ExcelScript.ConditionalFormatColorCriterionType.lowestValue },
-    midpoint: { color: cfg.escalaAmarillo, formula: "0", type: ExcelScript.ConditionalFormatColorCriterionType.number },
-    maximum: { color: cfg.escalaRojo, type: ExcelScript.ConditionalFormatColorCriterionType.highestValue }
-  });
+  ws.getRangeByIndexes(filaIni, col, numFilas, 1)
+    .addConditionalFormat(ExcelScript.ConditionalFormatType.colorScale)
+    .getColorScale()
+    .setCriteria({
+      minimum: { color: cfg.escalaVerde, type: ExcelScript.ConditionalFormatColorCriterionType.lowestValue },
+      midpoint: { color: cfg.escalaAmarillo, formula: "0", type: ExcelScript.ConditionalFormatColorCriterionType.number },
+      maximum: { color: cfg.escalaRojo, type: ExcelScript.ConditionalFormatColorCriterionType.highestValue }
+    });
 }
 
 // Encuadra un bloque de columnas con borde grueso por los cuatro lados, para separar
