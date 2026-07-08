@@ -231,11 +231,10 @@ function formatearCapitulos(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB)
     ws.getRangeByIndexes(headFilas, col1a + i * porOferta + 2, nDatos, 1).setNumberFormat(cfg.fmtPct);
   }
 
-  // --- SEMÁFORO (formato condicional por columna, solo filas de capitulos, sin TOTAL):
-  //     importe mas bajo en verde, mas alto en rojo, intermedios en gradiente.
-  //     En las columnas de desviacion, el punto amarillo se ancla en 0 (la media).
+  // --- SEMÁFORO SOLO EN LOS DIFERENCIALES (sin fila TOTAL). Las columnas de
+  //     Importe PEC se dejan en blanco, sin escala: el color va en Δ € y Δ % s/Media,
+  //     con el punto amarillo anclado en 0 (la media): por debajo verde, por encima rojo.
   for (let i = 0; i < N; i++) {
-    escalaSemaforo(ws, headFilas, col1a + i * porOferta, numCap, cfg);       // Importe PEC
     escalaDesviacion(ws, headFilas, col1a + i * porOferta + 1, numCap, cfg); // Δ € s/Media
     escalaDesviacion(ws, headFilas, col1a + i * porOferta + 2, numCap, cfg); // Δ % s/Media
   }
@@ -288,9 +287,8 @@ function formatearAgrupado(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) 
     ws.getRangeByIndexes(headFilas, col1a + i * porOferta + 2, nDatos, 1).setNumberFormat(cfg.fmtPct);
   }
 
-  // --- SEMÁFORO por columna (solo filas de grupos, sin TOTAL) ---
+  // --- SEMÁFORO SOLO EN LOS DIFERENCIALES (sin fila TOTAL). Importe PEC en blanco ---
   for (let i = 0; i < N; i++) {
-    escalaSemaforo(ws, headFilas, col1a + i * porOferta, numGrupos, cfg);
     escalaDesviacion(ws, headFilas, col1a + i * porOferta + 1, numGrupos, cfg);
     escalaDesviacion(ws, headFilas, col1a + i * porOferta + 2, numGrupos, cfg);
   }
