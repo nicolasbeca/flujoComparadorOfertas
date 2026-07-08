@@ -49,8 +49,10 @@ function main(workbook: ExcelScript.Workbook) {
     escalaAmarillo: "#FFEB84",       // valores intermedios
     escalaRojo: "#F8696B",           // valor mas ALTO (caro)
 
-    // Grosor del borde que encuadra el bloque de columnas de cada oferta
-    pesoBorde: ExcelScript.BorderWeight.thick,
+    // NOTA: el grosor del borde que encuadra cada oferta se cambia en la funcion
+    // encuadrar() (al final del script). No puede ir aqui: el linter de Office Scripts
+    // prohibe guardar valores de la API (como ExcelScript.BorderWeight) en variables
+    // u objetos ("Aliasing or assignment of Office Scripts APIs is not allowed").
 
     // Formatos de numero
     fmtEuro2: "#,##0.00\" €\"",      // importes con decimales
@@ -245,7 +247,7 @@ function formatearCapitulos(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB)
 
   // --- Bordes gruesos encuadrando el bloque de cada oferta ---
   for (let i = 0; i < N; i++) {
-    encuadrar(ws, 0, col1a + i * porOferta, filaTotal + 1, porOferta, cfg.pesoBorde);
+    encuadrar(ws, 0, col1a + i * porOferta, filaTotal + 1, porOferta);
   }
 
   // --- Anchos ---
@@ -307,7 +309,7 @@ function formatearAgrupado(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) 
 
   // --- Bordes gruesos encuadrando el bloque de cada oferta ---
   for (let i = 0; i < N; i++) {
-    encuadrar(ws, 0, col1a + i * porOferta, filaTotal + 1, porOferta, cfg.pesoBorde);
+    encuadrar(ws, 0, col1a + i * porOferta, filaTotal + 1, porOferta);
   }
 
   // --- Anchos ---
@@ -386,7 +388,7 @@ function formatearPartidas(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) 
 
   // --- Bordes gruesos encuadrando el bloque (P. Unit + Importe) de cada oferta ---
   for (let i = 0; i < N; i++) {
-    encuadrar(ws, 0, col1a + i * porOferta, headFilas + nDatos, porOferta, cfg.pesoBorde);
+    encuadrar(ws, 0, col1a + i * porOferta, headFilas + nDatos, porOferta);
   }
 
   // --- Anchos ---
@@ -482,20 +484,23 @@ function escalaDesviacion(ws: ExcelScript.Worksheet, filaIni: number, col: numbe
 
 // Encuadra un bloque de columnas con borde grueso por los cuatro lados, para separar
 // visualmente las columnas de cada constructora.
+// GROSOR DEL BORDE: para cambiarlo, sustituye "thick" por "medium" (o "thin") en las
+// cuatro lineas setWeight de abajo.
+// OJO: los valores de la API (ExcelScript.BorderIndex..., ExcelScript.BorderWeight...)
+// NO pueden guardarse en variables, arrays ni parametros: el linter de Office Scripts
+// lo prohibe ("Aliasing or assignment of Office Scripts APIs is not allowed"). Por eso
+// los cuatro lados van escritos uno a uno, con el enum en la propia llamada.
 function encuadrar(ws: ExcelScript.Worksheet, filaIni: number, colIni: number,
-  numFilas: number, numCols: number, peso: ExcelScript.BorderWeight) {
+  numFilas: number, numCols: number) {
   let f = ws.getRangeByIndexes(filaIni, colIni, numFilas, numCols).getFormat();
-  let lados: ExcelScript.BorderIndex[] = [
-    ExcelScript.BorderIndex.edgeLeft,
-    ExcelScript.BorderIndex.edgeRight,
-    ExcelScript.BorderIndex.edgeTop,
-    ExcelScript.BorderIndex.edgeBottom
-  ];
-  for (let i = 0; i < lados.length; i++) {
-    let b = f.getRangeBorder(lados[i]);
-    b.setStyle(ExcelScript.BorderLineStyle.continuous);
-    b.setWeight(peso);
-  }
+  f.getRangeBorder(ExcelScript.BorderIndex.edgeLeft).setStyle(ExcelScript.BorderLineStyle.continuous);
+  f.getRangeBorder(ExcelScript.BorderIndex.edgeLeft).setWeight(ExcelScript.BorderWeight.thick);
+  f.getRangeBorder(ExcelScript.BorderIndex.edgeRight).setStyle(ExcelScript.BorderLineStyle.continuous);
+  f.getRangeBorder(ExcelScript.BorderIndex.edgeRight).setWeight(ExcelScript.BorderWeight.thick);
+  f.getRangeBorder(ExcelScript.BorderIndex.edgeTop).setStyle(ExcelScript.BorderLineStyle.continuous);
+  f.getRangeBorder(ExcelScript.BorderIndex.edgeTop).setWeight(ExcelScript.BorderWeight.thick);
+  f.getRangeBorder(ExcelScript.BorderIndex.edgeBottom).setStyle(ExcelScript.BorderLineStyle.continuous);
+  f.getRangeBorder(ExcelScript.BorderIndex.edgeBottom).setWeight(ExcelScript.BorderWeight.thick);
 }
 
 // =====================================================================================
@@ -535,7 +540,6 @@ interface CfgB {
   escalaVerde: string;
   escalaAmarillo: string;
   escalaRojo: string;
-  pesoBorde: ExcelScript.BorderWeight;
   fmtEuro2: string;
   fmtEuro0: string;
   fmtPct: string;
