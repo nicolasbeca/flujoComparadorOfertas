@@ -6,7 +6,7 @@ desde Power Automate ("Run script from SharePoint library"). Tres scripts en cad
 | Script | Fichero | Qué hace | Parámetros |
 |---|---|---|---|
 | **Lector** | `script-lector.ts` | Lee el Excel de cada constructora y clasifica sus filas (padre solo si `/^C\d{2}$/`) | `nombreOferta` |
-| **A — Cálculo** | `script-a-calculo.ts` | Genera las 4 hojas con solo valores, aplica el criterio maestro y deja la hoja oculta `_CONTRATO` | `ofertasJson` (string) |
+| **A — Cálculo** | `script-a-calculo.ts` | Genera las 6 hojas con solo valores, aplica el criterio maestro y deja la hoja oculta `_CONTRATO` | `ofertasJson` (string) |
 | **B — Formato** | `script-b-formato.ts` | Aplica solo estética leyendo `_CONTRATO` (semáforos, bordes, merges, paneles). Re-ejecutable sin riesgo | (ninguno) |
 
 ## Criterio maestro (Script A)
@@ -23,34 +23,51 @@ desde Power Automate ("Run script from SharePoint library"). Tres scripts en cad
 
 ## Hojas generadas
 
-1. **Resumen ofertas** — PEC por oferta, desviaciones vs más económica y vs media, PEM
-   manual, columna Aviso (anomalía PEM/PEC: >20 % por debajo de la media, configurable).
-2. **Resumen capitulos** — solo padres, importe de fila por oferta, media, desviaciones,
+1. **Portada** — resumen ejecutivo: nº de ofertas, más económica y su importe, media,
+   ahorro vs media (€ y %), horquilla, fecha de generación, nombre de obra (si viene en
+   el campo opcional `obra` del JSON) y estado de cuadre.
+2. **Resumen ofertas** — **ordenada de más barata a más cara** con columna **Ranking**,
+   PEC por oferta, desviaciones vs más económica y vs media, PEM manual, columna Aviso
+   (anomalía PEM/PEC: >20 % por debajo de la media del resto; oferta incompleta:
+   `numPartidas` <50 % de la media del resto; ambos configurables).
+3. **Resumen capitulos** — solo padres, importe de fila por oferta, media, desviaciones,
    TOTAL PEC y columna **Aviso "X"** donde las partidas no casan con la fila del capítulo.
-3. **Resumen agrupado** — oficios en MAYÚSCULAS según `tablaGrupos()` (editable):
+4. **Resumen agrupado** — oficios en MAYÚSCULAS según `tablaGrupos()` (editable):
    ESTRUCTURAS C01–C04 · OBRA SUCIA C05–C08 · CARPINTERÍA Y CERRAJERÍA C09–C11 ·
    PINTURAS C12 · URBANIZACIÓN C13+C14 · VARIOS C15 · INSTALACIONES
    C16+C30+C31+C32+C33+C38+C39+C40+C41+C43+C44 · CONTROL DE CALIDAD C45 ·
    SEGURIDAD Y SALUD C46 · GESTIÓN DE RESIDUOS C47. Los padres fuera de la tabla van a
    **SIN CLASIFICAR (REVISAR)** con fila de AVISO; se comprueba además numéricamente que
    la suma de grupos = TOTAL PEC.
-4. **Comparativa partidas** — capítulos, subcapítulos y partidas en orden original.
+5. **Comparativa partidas** — capítulos, subcapítulos y partidas en orden original.
    Columna de marca al inicio: **"X"** en partidas cuyo código se repite dentro de una
    misma oferta (las repetidas conservan su fila y posición; se alinean entre ofertas
-   por número de ocurrencia).
+   por número de ocurrencia). Al final: **Alcance** (`SOLO <oferta>` si solo la cotiza
+   una), **Desv. s/media** compacta (solo ofertas fuera del umbral, p. ej.
+   `ACME +32% | BETA -28%`), fila **TOTAL partidas** y fila de CUADRE.
+6. **Top desviaciones** — las 20 partidas (configurable) con mayor diferencia en euros
+   entre la oferta más cara y la más barata (cotizadas por 2+ ofertas), de mayor a menor.
+
+**Cuadre visible**: al pie de cada hoja de importes hay una fila `CUADRE` con
+`CUADRE OK` o `DESCUADRE: X € — detalle` comparando TOTAL PEC, suma de capítulos,
+suma de grupos y suma de partidas por oferta. Todos los importes se redondean a
+2 decimales al leer el JSON, así las sumas cuadran sin arrastres de decimales.
 
 ## Contrato entre A y B
 
 Hoja oculta `_CONTRATO` (pares clave/valor, índices 0-based) con número de ofertas,
-nombres, nombres de hojas e índices de filas/columnas clave. `VERSION = 2`. El Script B
-actual funciona sin cambios: todos los desplazamientos de columnas (marca al inicio de
-la comparativa, Aviso al final de capítulos) viajan en el contrato. La lista completa de
-claves está en la cabecera de `script-a-calculo.ts`.
+nombres, nombres de hojas e índices de filas/columnas clave, incluidas las celdas de
+cuadre (`*_FILA_CUADRE`/`*_COL_CUADRE`: verde si empieza por `CUADRE OK`, rojo si
+empieza por `DESCUADRE`). `VERSION = 3`. El Script B v2 sigue funcionando (lee todos
+los índices del contrato); las claves nuevas (Portada, Top, Ranking, Alcance,
+Desv. s/media, cuadre) las usa un B actualizado. La lista completa de claves está en
+la cabecera de `script-a-calculo.ts`.
 
 ## Config editable
 
-- Script A: `UMBRAL_ANOMALIA_PEM` (20 %), `TOLERANCIA_CUADRE_CAPITULO` (1 €),
-  `TOLERANCIA_DESCUADRE` (1 €), `tablaGrupos()`.
+- Script A: `UMBRAL_ANOMALIA_PEM` (20 %), `UMBRAL_OFERTA_INCOMPLETA` (50 %),
+  `UMBRAL_DESV_MEDIA` (25 %), `TOP_DESVIACIONES` (20), `TOLERANCIA_CUADRE_CAPITULO`
+  (1 €), `TOLERANCIA_DESCUADRE` (1 €), `TOLERANCIA_CUADRE_TOTAL` (1 €), `tablaGrupos()`.
 - Script B: colores, formatos de número, grosor de borde (en `encuadrar()`, no en la
   config: el linter prohíbe guardar enums de la API).
 
