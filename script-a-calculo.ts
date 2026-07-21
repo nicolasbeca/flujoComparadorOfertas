@@ -40,11 +40,12 @@
 // "Resumen capitulos" y "Resumen agrupado" suman exactamente lo mismo por construccion
 // y la fila de CUADRE no da falsos positivos por arrastres de decimales.
 // La fila de CUADRE visible (al pie de cada hoja de importes) compara por oferta:
-//   TOTAL PEC (resumen) vs suma de capitulos vs suma de grupos vs suma de partidas de
-//   "Comparativa partidas". Si todo casa (tolerancia configurable) → "CUADRE OK";
-//   si no → "DESCUADRE: X € — detalle". OJO: la suma de partidas puede descuadrar
-//   LEGITIMAMENTE si la constructora declara en la fila del capitulo un importe que no
-//   es la suma de sus partidas; ese caso tambien debe verse (nunca en silencio).
+//   TOTAL PEC (resumen) vs suma de capitulos vs suma de grupos. Si todo casa
+//   (tolerancia configurable) → "CUADRE OK"; si no → "DESCUADRE: X € — detalle".
+//   La SUMA DE PARTIDAS queda FUERA de esta comparacion a proposito: descuadra de
+//   forma legitima cuando la constructora declara en la fila del capitulo un importe
+//   que no es la suma exacta de sus partidas, y ese caso ya lo señala con precision
+//   la columna Aviso "X" de "Resumen capitulos" (capitulo a capitulo), sin ruido.
 //
 // -------------------------------------------------------------------------------------
 // CONTRATO ENTRE SCRIPT A Y SCRIPT B (VERSION 3)
@@ -211,7 +212,6 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
   let capImporte: { [c: string]: number }[] = [];    // por oferta: clave padre → importe de SU fila
   let sumaPartidas: { [c: string]: number }[] = [];  // por oferta: clave padre → suma de sus partidas
   let totalPEC: number[] = [];                       // por oferta: suma de filas padre
-  let totalPartidas: number[] = [];                  // por oferta: suma de TODAS sus partidas
   let numPartidas: number[] = [];                    // por oferta: nº de partidas (para aviso incompleta)
   let avisosDatos: string[] = [];                    // avisos de integridad de datos
   let nombreObra = "";                               // nombre de obra si alguna oferta lo trae
@@ -235,7 +235,6 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
     let padreActual = "";                        // CLAVE del ultimo padre visto (posicion)
     let huerfanas = 0;                           // importe NETO de partidas antes del 1er padre
     let huerfanasAbs = 0;                        // suma de |importe| (evita compensaciones)
-    let totPart = 0;                             // suma de todas las partidas de la oferta
     let nPart = 0;                               // nº de partidas de la oferta
 
     for (let j = 0; j < fs.length; j++) {
@@ -297,7 +296,6 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
       }
       if (pM[claveP] === undefined) { pM[claveP] = pre; iM[claveP] = imp; }
 
-      totPart += imp;
       nPart++;
 
       // Pertenencia por POSICION: la partida cuelga del ultimo padre visto por encima.
@@ -325,7 +323,6 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
     capImporte.push(cImp);
     sumaPartidas.push(sPart);
     totalPEC.push(r2(tot));
-    totalPartidas.push(r2(totPart));
     // nº de partidas: se usa el numPartidas del lector si viene; si no, el recuento propio
     numPartidas.push(typeof o.numPartidas === "number" ? o.numPartidas : nPart);
   }
@@ -392,11 +389,12 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
   // ===================================================================================
   // CUADRE GLOBAL VISIBLE — VALIDACIÓN CRÍTICA (nunca en silencio)
   // ===================================================================================
-  // Por oferta se comparan los cuatro totales: TOTAL PEC (resumen), suma de capitulos,
-  // suma de grupos y suma de partidas de "Comparativa partidas". El texto resultante
-  // se escribe al pie de las cuatro hojas de importes y el Script B lo pinta.
+  // Por oferta se comparan los totales estructurales: TOTAL PEC (resumen) vs suma de
+  // capitulos vs suma de grupos. La suma de partidas NO entra aqui (descuadra de forma
+  // legitima; su control fino es la columna Aviso "X" de "Resumen capitulos"). El texto
+  // resultante se escribe al pie de las cuatro hojas de importes y el Script B lo pinta.
   let textoCuadre = calcularTextoCuadre(nombres, totalPEC, capOrden, capImporte,
-    agr, totalPartidas, TOLERANCIA_CUADRE_TOTAL);
+    agr, TOLERANCIA_CUADRE_TOTAL);
 
   // ===================================================================================
   // ESCRITURA DE LAS SEIS HOJAS (solo valores) + CONTRATO
@@ -522,11 +520,14 @@ function calcularAgrupado(capOrden: string[], capCodigo: { [c: string]: string }
 // =====================================================================================
 // CUADRE GLOBAL: texto de la celda de cuadre visible
 // =====================================================================================
-// Compara por oferta los cuatro totales (PEC, capitulos, grupos, partidas). Devuelve
-// "CUADRE OK" si todo casa, o "DESCUADRE: X € — detalle" con la peor diferencia y el
-// detalle por oferta (que total se separa mas del PEC oficial).
+// Compara por oferta los totales estructurales (PEC vs suma de capitulos vs suma de
+// grupos). La SUMA DE PARTIDAS queda fuera a proposito: descuadra de forma legitima
+// cuando la fila del capitulo declara un importe que no es la suma de sus partidas, y
+// ese caso ya lo señala capitulo a capitulo la columna Aviso "X" de "Resumen
+// capitulos". Devuelve "CUADRE OK" si todo casa, o "DESCUADRE: X € — detalle" con la
+// peor diferencia y el detalle por oferta (que total se separa mas del PEC oficial).
 function calcularTextoCuadre(nombres: string[], totalPEC: number[], capOrden: string[],
-  capImporte: { [c: string]: number }[], agr: AgrupadoCalc, totalPartidas: number[],
+  capImporte: { [c: string]: number }[], agr: AgrupadoCalc,
   tolerancia: number): string {
 
   const N = nombres.length;
@@ -544,19 +545,15 @@ function calcularTextoCuadre(nombres: string[], totalPEC: number[], capOrden: st
     let sGru = 0;
     for (let g = 0; g < agr.grupos.length; g++) { sGru += agr.sumas[g][i]; }
     sGru = r2(sGru);
-    // Suma de partidas (lo que muestra la fila TOTAL de "Comparativa partidas")
-    let sPar = totalPartidas[i];
 
     let dCap = Math.abs(sCap - totalPEC[i]);
     let dGru = Math.abs(sGru - totalPEC[i]);
-    let dPar = Math.abs(sPar - totalPEC[i]);
 
     // La peor diferencia de esta oferta y de que hoja procede
     let peor = dCap;
     let hojaPeor = "suma de capitulos";
     let valPeor = sCap;
     if (dGru > peor) { peor = dGru; hojaPeor = "suma de grupos"; valPeor = sGru; }
-    if (dPar > peor) { peor = dPar; hojaPeor = "suma de partidas"; valPeor = sPar; }
 
     if (peor > tolerancia) {
       if (peor > peorGlobal) { peorGlobal = peor; }
@@ -1000,8 +997,10 @@ function hojaPartidasA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: st
     filas.push(fila);
   }
 
-  // Fila TOTAL partidas (suma de la columna Importe de cada oferta). Puede diferir del
-  // PEC oficial si las filas de capitulo declaran otra cosa: eso lo cuenta el CUADRE.
+  // Fila TOTAL partidas (suma de la columna Importe de cada oferta). Es INFORMATIVA:
+  // puede diferir del PEC oficial si las filas de capitulo declaran otra cosa, y eso
+  // es legitimo (lo señala capitulo a capitulo la columna Aviso "X" de "Resumen
+  // capitulos"; ya no cuenta como descuadre en la fila de CUADRE).
   let filaTotal = filas.length;
   let fT: (string | number)[] = ["", "", "", "TOTAL partidas", "", ""];
   for (let i = 0; i < N; i++) { fT.push(""); fT.push(r2(totPart[i])); }
