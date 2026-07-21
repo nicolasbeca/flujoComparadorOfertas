@@ -2,19 +2,25 @@
 // SCRIPT LECTOR — lee un presupuesto de obra y devuelve sus filas clasificadas
 // =====================================================================================
 // Se ejecuta desde Power Automate sobre el Excel de cada constructora. Devuelve
-// { nombre, filas, numPartidas } que el flujo acumula en el JSON `ofertasJson` para
-// el Script A.
+// { nombre, filas, numPartidas, totalOrigen, totalEncontrado } que el flujo acumula en
+// el JSON `ofertasJson` para el Script A.
 //
-// REGLA DE NIVEL (endurecida):
-//   - Una fila es capitulo PADRE solo si su codigo es "C" + dos digitos Y el numero
-//     esta dentro del rango de capitulos del proyecto (C01..C47, editable en
-//     esCapituloPadre). Asi un subcapitulo con codigo enganoso tipo "C49" NO se cuela
-//     como padre.
-//   - Cualquier otra fila de capitulo ("1", "2", "49", "C49", "F2_C03.01"...) es
+// REGLA DE NIVEL:
+//   - Una fila es capitulo PADRE si su codigo es "C" + exactamente dos digitos
+//     (C01..C99, mayuscula o minuscula). SIN tope de proyecto: el script vale para
+//     cualquier oferta; que no falte ni sobre un capitulo lo controla el CUADRE del
+//     Script A contra el total de origen (totalOrigen), no una lista de codigos aqui.
+//   - Cualquier otra fila de capitulo ("1", "2", "49", "F2_C03.01"...) es
 //     SUBCAPITULO (nivel:"sub").
 //   - Si la columna Nat dice "Subcapítulo" explicitamente, es sub SIEMPRE.
 //   - Las partidas siguen igual (tipo:"partida", nivel:"").
 // El orden original de las filas se respeta.
+//
+// TOTAL GENERAL DE ORIGEN: se busca al pie del Excel (recorriendo desde el final) una
+// fila cuyo codigo o resumen normalizado EMPIECE por "total", descartando los
+// subtotales de capitulo ("total c43", "totalc44"...). Su importe se devuelve en
+// `totalOrigen` con `totalEncontrado` = true; si no aparece, 0 y false (el Script A
+// avisara de que no se pudo validar). Esa fila NO se añade a `filas`.
 //
 // CABECERA Y COLUMNAS AUTODETECTADAS:
 //   - La fila de cabecera se busca en las primeras 15 filas (una celda con
@@ -44,6 +50,8 @@ function main(workbook: ExcelScript.Workbook, nombreOferta?: string): ResultadoO
 
   let filas: Fila[] = [];
   let numPartidas = 0;
+  let totalOrigen = 0;
+  let totalEncontrado = false;
   let rango = hoja.getUsedRange();
   if (rango) {
     // Leer SIEMPRE desde la columna A: si el rango usado empezara en B (columna A
@@ -108,13 +116,40 @@ function main(workbook: ExcelScript.Workbook, nombreOferta?: string): ResultadoO
       });
       numPartidas++;
     }
+
+    // --- TOTAL GENERAL de origen: se busca DESDE EL FINAL hacia arriba (esta al pie)
+    //     y se acepta la PRIMERA coincidencia valida encontrada desde abajo. Una fila
+    //     es total si su codigo o su resumen normalizado EMPIEZA por "total", salvo
+    //     los subtotales de capitulo ("total c43", "totalc44"...): esos se descartan
+    //     y se sigue subiendo. OJO: "total 0" SI es total general (el 0 es el marcador
+    //     de obra sin nombre, no un capitulo); solo se descarta el patron c+digitos.
+    //     El importe se lee de la MISMA columna de importes que usan las partidas. ---
+    for (let i = datos.length - 1; i >= primeraFilaDatos; i--) {
+      let f = datos[i];
+      let txtCod = normaliza((f[cCod] || "").toString());
+      let txtRes = normaliza((f[cRes] || "").toString());
+      let candidato = "";
+      if (txtCod.indexOf("total") === 0) { candidato = txtCod; }
+      else if (txtRes.indexOf("total") === 0) { candidato = txtRes; }
+      if (candidato === "") { continue; }
+
+      // Subtotal de capitulo: tras "total" (sin espacios) viene "c" + digitos.
+      let sinEspacios = candidato.replace(/\s+/g, "");
+      if (/^totalc\d+/.test(sinEspacios)) { continue; }
+
+      totalOrigen = aNumero(f[cImp]);
+      totalEncontrado = true;
+      break;
+    }
   }
 
   let nombre = (nombreOferta && nombreOferta.trim().length > 0) ? nombreOferta.trim() : "Oferta";
   // numPartidas expone cuantas partidas reales trae esta oferta (sin contar las
   // vacias descartadas), para que el script comparador pueda detectar ofertas
-  // anomalas con muchas menos partidas que las demas.
-  return { nombre: nombre, filas: filas, numPartidas: numPartidas };
+  // anomalas con muchas menos partidas que las demas. totalOrigen/totalEncontrado
+  // exponen el TOTAL GENERAL declarado al pie del Excel de origen, para que el
+  // comparador pueda cuadrar el PEC calculado contra el total oficial.
+  return { nombre: nombre, filas: filas, numPartidas: numPartidas, totalOrigen: totalOrigen, totalEncontrado: totalEncontrado };
 }
 
 // =====================================================================================
@@ -189,21 +224,14 @@ function buscarColumnas(datos: (string | number | boolean)[][], filaCabecera: nu
 }
 
 // =====================================================================================
-// REGLA DE CAPÍTULO PADRE — CONFIG EDITABLE POR PROYECTO
+// REGLA DE CAPÍTULO PADRE
 // =====================================================================================
-// Padre = "C" + exactamente 2 digitos (mayuscula o minuscula), sin puntos ni nada mas,
-// Y ADEMAS el numero debe estar entre PADRE_MIN y PADRE_MAX.
-// OJO: el filtro por rango es lo que evita el fallo recurrente: un subcapitulo con
-// codigo "C49" (o C48, C50...) casa con el patron C+2digitos pero NO es un capitulo
-// padre del proyecto (los padres reales van de C01 a C47). Si en otro proyecto los
-// padres llegan mas alla, sube PADRE_MAX aqui.
+// Padre = "C" + exactamente 2 digitos (C01..C99, mayuscula o minuscula), sin puntos ni
+// nada mas. SIN tope de proyecto: el script vale para cualquier oferta. Que no falte
+// ni sobre un capitulo se controla por CUADRE en el Script A (contra totalOrigen), no
+// escondiendo codigos aqui.
 function esCapituloPadre(cod: string): boolean {
-  const PADRE_MIN = 1;
-  const PADRE_MAX = 47; // ultimo capitulo padre real del proyecto (C47 = Gestion de residuos)
-  let m = cod.trim().toUpperCase().match(/^C(\d{2})$/);
-  if (!m) { return false; }
-  let n = parseInt(m[1], 10);
-  return n >= PADRE_MIN && n <= PADRE_MAX;
+  return /^C\d{2}$/.test(cod.trim().toUpperCase());
 }
 
 // Normaliza un texto de cabecera para compararlo: minusculas y sin acentos.
@@ -246,4 +274,10 @@ interface IndicesColumnas {
   precio: number;
   importe: number;
 }
-interface ResultadoOferta { nombre: string; filas: Fila[]; numPartidas: number; }
+interface ResultadoOferta {
+  nombre: string;
+  filas: Fila[];
+  numPartidas: number;
+  totalOrigen: number;       // TOTAL GENERAL declarado al pie del Excel de origen
+  totalEncontrado: boolean;  // false si no se localizo ninguna fila de total valida
+}
