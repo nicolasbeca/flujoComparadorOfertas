@@ -29,7 +29,8 @@ desde Power Automate ("Run script from SharePoint library"). Tres scripts en cad
 2. **Resumen ofertas** — **ordenada de más barata a más cara** con columna **Ranking**,
    PEC por oferta, desviaciones vs más económica y vs media, PEM manual, columna Aviso
    (anomalía PEM/PEC: >20 % por debajo de la media del resto; oferta incompleta:
-   `numPartidas` <50 % de la media del resto; ambos configurables).
+   `numPartidas` <50 % de la media del resto; ambos configurables) y última columna
+   **Plazo (manual)** para apuntar el plazo propuesto por cada constructora.
 3. **Resumen capitulos** — solo padres, importe de fila por oferta, media, desviaciones,
    TOTAL PEC y columna **Aviso "X"** donde las partidas no casan con la fila del capítulo.
 4. **Resumen agrupado** — oficios en MAYÚSCULAS según `tablaGrupos()` (editable):

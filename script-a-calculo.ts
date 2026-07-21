@@ -64,7 +64,9 @@
 //     RES_HEADER_FILAS, RES_FILA_RESUMEN_INI, RES_FILA_AVISO_INI, RES_NUM_AVISOS,
 //     RES_NUM_COLS, RES_COL_RANKING, RES_COL_EMPRESA, RES_COL_PEM, RES_COL_PEC,
 //     RES_COL_DIF_ECO_EUR, RES_COL_DIF_ECO_PCT, RES_COL_DIF_MED_EUR,
-//     RES_COL_DIF_MED_PCT, RES_COL_AVISO, RES_FILA_CUADRE, RES_COL_CUADRE
+//     RES_COL_DIF_MED_PCT, RES_COL_AVISO, RES_FILA_CUADRE, RES_COL_CUADRE,
+//     RES_COL_PLAZO (ultima columna, de relleno MANUAL como la de PEM: el plazo de
+//     ejecucion propuesto por cada constructora; B debe pintarla como celda manual)
 //     OJO B: el orden de las filas de oferta ya NO es el de NOMBRE_1..n, es por PEC
 //     ascendente; la empresa de cada fila se lee de RES_COL_EMPRESA.
 //
@@ -597,13 +599,16 @@ function hojaPortadaA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: str
 // La columna Aviso concentra: anomalia PEM/PEC (total muy por debajo de la media de
 // las demas) y oferta posiblemente incompleta (numPartidas muy inferior a la media
 // de las demas). Ambos umbrales en la zona de configuracion.
+// La ULTIMA columna es "Plazo (manual)": ahi se apunta a mano el plazo de ejecucion
+// propuesto por cada constructora (texto libre: meses, semanas...), igual que la
+// columna "PEM (manual)". Este script solo deja el hueco; no la calcula ni la valida.
 function hojaResumenA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: string[],
   totalPEC: number[], numPartidas: number[], umbralAnomalia: number,
   umbralIncompleta: number, textoCuadre: string): LayoutResumen {
 
   let ws = recrear(wb, nombreHoja);
   const N = nombres.length;
-  const COLS = 9;
+  const COLS = 10;
 
   let mn = totalPEC[0], mx = totalPEC[0], suma = 0;
   for (let i = 0; i < N; i++) {
@@ -619,7 +624,7 @@ function hojaResumenA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: str
   let ordenIdx = ordenAscendente(totalPEC);
 
   let filas: (string | number)[][] = [];
-  filas.push(["Ranking", "EMPRESA", "PEM (manual)", "IMPORTE PEC", "Δ vs +econ. (€)", "Δ vs +econ. (%)", "Δ vs media (€)", "Δ vs media (%)", "Aviso"]);
+  filas.push(["Ranking", "EMPRESA", "PEM (manual)", "IMPORTE PEC", "Δ vs +econ. (€)", "Δ vs +econ. (%)", "Δ vs media (€)", "Δ vs media (%)", "Aviso", "Plazo (manual)"]);
 
   for (let p = 0; p < N; p++) {
     let i = ordenIdx[p];
@@ -659,18 +664,19 @@ function hojaResumenA(wb: ExcelScript.Workbook, nombreHoja: string, nombres: str
       mn > 0 ? r4((v - mn) / mn) : 0,
       r2(v - media),
       media > 0 ? r4((v - media) / media) : 0,
-      avisos.join(" | ")
+      avisos.join(" | "),
+      "" // Plazo se rellena a mano
     ]);
   }
 
-  filas.push(["", "", "", "", "", "", "", "", ""]);
+  filas.push(["", "", "", "", "", "", "", "", "", ""]);
   let filaResumenIni = filas.length;
-  filas.push(["", "Oferta más económica", "", r2(mn), "", "", "", "", ""]);
-  filas.push(["", "Media " + N + " ofertas", "", r2(media), "", "", "", "", ""]);
-  filas.push(["", "Horquilla (máx − mín)", "", r2(mx - mn), "", "", "", "", ""]);
-  filas.push(["", "", "", "", "", "", "", "", ""]);
+  filas.push(["", "Oferta más económica", "", r2(mn), "", "", "", "", "", ""]);
+  filas.push(["", "Media " + N + " ofertas", "", r2(media), "", "", "", "", "", ""]);
+  filas.push(["", "Horquilla (máx − mín)", "", r2(mx - mn), "", "", "", "", "", ""]);
+  filas.push(["", "", "", "", "", "", "", "", "", ""]);
   let filaCuadre = filas.length;
-  filas.push(["CUADRE", textoCuadre, "", "", "", "", "", "", ""]);
+  filas.push(["CUADRE", textoCuadre, "", "", "", "", "", "", "", ""]);
 
   ws.getRangeByIndexes(0, 0, filas.length, COLS).setValues(filas);
   return { filaResumenIni: filaResumenIni, filaCuadre: filaCuadre, numCols: COLS };
@@ -1114,6 +1120,7 @@ function escribirContrato(wb: ExcelScript.Workbook, nombreHoja: string,
   pares.push(["RES_COL_DIF_MED_EUR", 6]);
   pares.push(["RES_COL_DIF_MED_PCT", 7]);
   pares.push(["RES_COL_AVISO", 8]);
+  pares.push(["RES_COL_PLAZO", 9]);
   pares.push(["RES_FILA_CUADRE", layR.filaCuadre]);
   pares.push(["RES_COL_CUADRE", 1]);
 
