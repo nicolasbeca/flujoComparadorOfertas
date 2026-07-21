@@ -4,7 +4,8 @@
 // Se ejecuta DESPUÉS del Script A (cálculo) sobre el mismo libro. Lee la hoja oculta
 // "_CONTRATO" que dejó A para saber cuántas ofertas hay, cómo se llaman las hojas y en
 // qué fila/columna está cada cosa. NO recalcula nada: solo lee valores ya escritos
-// cuando lo necesita para decidir un formato (p. ej. qué filas son de tipo Capitulo).
+// cuando lo necesita para decidir un formato (p. ej. qué filas son de tipo Capitulo, o
+// si la celda de cuadre dice "CUADRE OK" o "DESCUADRE").
 //
 // Es idempotente: se puede ejecutar todas las veces que haga falta sin romper los datos
 // (deshace merges, inmovilizaciones y formatos condicionales antes de reaplicarlos).
@@ -12,11 +13,16 @@
 // ejecutar este script sin repetir el A).
 //
 // -------------------------------------------------------------------------------------
-// CONTRATO CON EL SCRIPT A
+// CONTRATO CON EL SCRIPT A (VERSION 3)
 // -------------------------------------------------------------------------------------
 // La hoja "_CONTRATO" (oculta) tiene pares clave/valor: col A = clave, col B = valor.
 // Las claves están documentadas en la cabecera del Script A. Índices 0-based. Si falta
 // la hoja o una clave, este script se detiene con un error claro pidiendo ejecutar A.
+// Este script exige VERSION 3 (hojas Portada y Top desviaciones, celdas de CUADRE,
+// columnas Ranking/Plazo en Resumen y Alcance/Desv. s/media en Comparativa).
+//
+// Celdas de CUADRE (*_FILA_CUADRE/*_COL_CUADRE y POR_FILA_CUADRE): verde si el texto
+// empieza por "CUADRE OK", rojo con letra blanca si empieza por "DESCUADRE".
 //
 // -------------------------------------------------------------------------------------
 // RESTRICCIONES DEL RUNTIME (Office Scripts desde Power Automate)
@@ -24,6 +30,8 @@
 // Runtime síncrono: nada de .find(), .reduce(), .map(), .filter(), spread (...) ni
 // flechas en callbacks de array. Solo bucles `for` clásicos. Formato por RANGOS; el
 // semáforo se hace con formato condicional (color scale), una sola llamada por columna.
+// Los enums de la API (BorderWeight, ConditionalFormatType...) NUNCA se guardan en
+// variables (regla de aliasing del linter): van escritos en la propia llamada.
 // =====================================================================================
 
 function main(workbook: ExcelScript.Workbook) {
@@ -40,9 +48,15 @@ function main(workbook: ExcelScript.Workbook) {
     colorCapitulo: "BDD7EE",         // fila Tipo="Capitulo" (azul fuerte)
     colorSubcapitulo: "DEEBF7",      // fila Tipo="Subcapitulo" (azul claro)
     colorMejor: "C6EFCE",            // verde: fila de la oferta mas economica
-    colorAlerta: "FFC000",           // naranja: avisos y descuadres
+    colorAlerta: "FFC000",           // naranja: avisos, descuadres y alcance singular
     colorTotal: "DDEBF7",            // filas TOTAL
-    colorManual: "FFF2CC",           // amarillo suave: celdas de entrada manual (PEM)
+    colorManual: "FFF2CC",           // amarillo suave: celdas de entrada manual (PEM, Plazo)
+
+    // Colores de la celda de CUADRE (estado del cuadre global)
+    colorCuadreOk: "C6EFCE",         // fondo verde si "CUADRE OK"
+    colorCuadreOkTexto: "006100",    // letra verde oscuro
+    colorCuadreMal: "C00000",        // fondo rojo si "DESCUADRE"
+    colorCuadreMalTexto: "FFFFFF",   // letra blanca sobre rojo
 
     // Colores del semaforo (formato condicional de escala; estos SI llevan #)
     escalaVerde: "#63BE7B",          // valor mas BAJO (barato)
@@ -63,16 +77,18 @@ function main(workbook: ExcelScript.Workbook) {
 
   // Leer el contrato que dejo el Script A (y comprobar que es de la version esperada)
   let meta = leerContrato(workbook, cfg.hojaContrato);
-  if (metaNum(meta, "VERSION") !== 2) {
-    throw new Error("El contrato es de otra version (" + meta["VERSION"] + "). Ejecuta el Script A actualizado antes que este.");
+  if (metaNum(meta, "VERSION") !== 3) {
+    throw new Error("El contrato es de otra version (" + meta["VERSION"] + "); este Script B necesita la VERSION 3. Ejecuta el Script A actualizado antes que este.");
   }
 
+  formatearPortada(workbook, meta, cfg);
   formatearResumen(workbook, meta, cfg);
   formatearCapitulos(workbook, meta, cfg);
   formatearAgrupado(workbook, meta, cfg);
   formatearPartidas(workbook, meta, cfg);
+  formatearTop(workbook, meta, cfg);
 
-  // Limpieza final: quitar hojas residuales, ocultar el contrato y activar el resumen
+  // Limpieza final: quitar hojas residuales, ocultar el contrato y activar la Portada
   limpiezaFinal(workbook, meta, cfg);
 }
 
@@ -128,16 +144,67 @@ function hojaDelContrato(wb: ExcelScript.Workbook, meta: Contrato, clave: string
 }
 
 // =====================================================================================
-// HOJA 1: "Resumen ofertas"
+// HOJA "Portada": resumen ejecutivo
 // =====================================================================================
+// El formato de cada celda de valor se decide por el TEXTO de su etiqueta (nada de
+// indices de fila fijos): si la etiqueta termina en "(%)" es porcentaje; si contiene
+// "(€)", "(PEC)" o "máx − mín" es un importe en euros; el resto (conteos, textos,
+// fecha, obra) se queda en formato general.
+function formatearPortada(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) {
+  let ws = hojaDelContrato(wb, meta, "HOJA_PORTADA");
+  const numFilas = metaNum(meta, "POR_NUM_FILAS");
+  const colEti = metaNum(meta, "POR_COL_ETIQUETA");
+  const colVal = metaNum(meta, "POR_COL_VALOR");
+  const filaCuadre = metaNum(meta, "POR_FILA_CUADRE");
+
+  // --- Titulo grande en la fila 0 ---
+  let titulo = ws.getRangeByIndexes(0, 0, 1, 2);
+  titulo.getFormat().getFont().setBold(true);
+  titulo.getFormat().getFont().setSize(16);
+  titulo.getFormat().getFont().setColor(cfg.colorCabecera);
+
+  // --- Columna de etiquetas en negrita (desde la fila 1: la 0 es el titulo) ---
+  if (numFilas > 1) {
+    ws.getRangeByIndexes(1, colEti, numFilas - 1, 1).getFormat().getFont().setBold(true);
+  }
+
+  // --- Formato de los valores segun su etiqueta ---
+  let vals = ws.getRangeByIndexes(0, 0, numFilas, colVal + 1).getValues();
+  for (let r = 1; r < numFilas; r++) {
+    let eti = String(vals[r][colEti]);
+    if (eti === "") { continue; }
+    let celda = ws.getRangeByIndexes(r, colVal, 1, 1);
+    if (eti.endsWith("(%)")) {
+      celda.setNumberFormat(cfg.fmtPct);
+    } else if (eti.indexOf("(€)") >= 0 || eti.indexOf("(PEC)") >= 0 || eti.indexOf("máx − mín") >= 0) {
+      celda.setNumberFormat(cfg.fmtEuro2);
+    }
+    // Conteos (Nº de ofertas), textos y fecha: sin formato de moneda
+  }
+
+  // --- Celda de estado de cuadre: en la Portada el texto esta en POR_COL_VALOR
+  //     (no existe POR_COL_CUADRE) y su etiqueta en POR_COL_ETIQUETA ---
+  pintarCuadre(ws, filaCuadre, colEti, colVal, cfg);
+
+  // --- Anchos amplios ---
+  ws.getRangeByIndexes(0, colEti, 1, 1).getFormat().setColumnWidth(300);
+  ws.getRangeByIndexes(0, colVal, 1, 1).getFormat().setColumnWidth(280);
+}
+
+// =====================================================================================
+// HOJA "Resumen ofertas"
+// =====================================================================================
+// La hoja llega ORDENADA por PEC ascendente desde el Script A, con la columna Ranking
+// en RES_COL_RANKING y la de Plazo (manual) en RES_COL_PLAZO. Todos los indices salen
+// del contrato: aqui no hay numeros de columna fijos.
 function formatearResumen(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) {
   let ws = hojaDelContrato(wb, meta, "HOJA_RESUMEN");
   limpiarCondicionales(ws);
   const N = metaNum(meta, "NUM_OFERTAS");
   const COLS = metaNum(meta, "RES_NUM_COLS");
   const filaResIni = metaNum(meta, "RES_FILA_RESUMEN_INI");
-  const filaAvisoIni = metaNum(meta, "RES_FILA_AVISO_INI");
-  const numAvisos = metaNum(meta, "RES_NUM_AVISOS");
+  const colRanking = metaNum(meta, "RES_COL_RANKING");
+  const colEmpresa = metaNum(meta, "RES_COL_EMPRESA");
   const colPem = metaNum(meta, "RES_COL_PEM");
   const colPec = metaNum(meta, "RES_COL_PEC");
   const colDifEcoEur = metaNum(meta, "RES_COL_DIF_ECO_EUR");
@@ -145,6 +212,9 @@ function formatearResumen(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) {
   const colDifMedEur = metaNum(meta, "RES_COL_DIF_MED_EUR");
   const colDifMedPct = metaNum(meta, "RES_COL_DIF_MED_PCT");
   const colAviso = metaNum(meta, "RES_COL_AVISO");
+  const colPlazo = metaNum(meta, "RES_COL_PLAZO");
+  const filaCuadre = metaNum(meta, "RES_FILA_CUADRE");
+  const colCuadre = metaNum(meta, "RES_COL_CUADRE");
 
   // --- Cabecera: azul corporativo, texto blanco, negrita ---
   let cab = ws.getRangeByIndexes(0, 0, 1, COLS);
@@ -153,35 +223,39 @@ function formatearResumen(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) {
   cab.getFormat().getFill().setColor(cfg.colorCabecera);
   cab.getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
 
-  // --- Formatos de numero (por rangos) ---
+  // --- Formatos de numero (por rangos; los calculados por el contrato, sin aritmetica
+  //     a ojo: debajo de las filas de resumen hay ahora blanco + fila de CUADRE) ---
   ws.getRangeByIndexes(1, colPem, N, 1).setNumberFormat(cfg.fmtEuro2);
-  ws.getRangeByIndexes(1, colPec, filaResIni + 2, 1).setNumberFormat(cfg.fmtEuro2); // incluye filas de resumen
+  ws.getRangeByIndexes(1, colPec, N, 1).setNumberFormat(cfg.fmtEuro2);
+  ws.getRangeByIndexes(filaResIni, colPec, 3, 1).setNumberFormat(cfg.fmtEuro2); // economica, media, horquilla
   ws.getRangeByIndexes(1, colDifEcoEur, N, 1).setNumberFormat(cfg.fmtEuro2);
   ws.getRangeByIndexes(1, colDifEcoPct, N, 1).setNumberFormat(cfg.fmtPct);
   ws.getRangeByIndexes(1, colDifMedEur, N, 1).setNumberFormat(cfg.fmtEuro2);
   ws.getRangeByIndexes(1, colDifMedPct, N, 1).setNumberFormat(cfg.fmtPct);
+  // OJO: Plazo NO lleva formato de euros (es una duracion, no un importe): general.
 
-  // --- Celdas de entrada manual (PEM): fondo amarillo suave ---
+  // --- Ranking: centrado y en negrita ---
+  let rk = ws.getRangeByIndexes(1, colRanking, N, 1);
+  rk.getFormat().getFont().setBold(true);
+  rk.getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+
+  // --- Verde: la oferta mas economica. El Script A garantiza el orden ascendente por
+  //     PEC, asi que la primera fila de datos es SIEMPRE la ganadora ---
+  ws.getRangeByIndexes(1, 0, 1, COLS).getFormat().getFill().setColor(cfg.colorMejor);
+
+  // --- Celdas de entrada manual (PEM y Plazo): fondo amarillo suave, mismo tratamiento.
+  //     Se pintan DESPUES del verde para que se vea que son editables tambien en la
+  //     fila ganadora ---
   ws.getRangeByIndexes(1, colPem, N, 1).getFormat().getFill().setColor(cfg.colorManual);
+  ws.getRangeByIndexes(1, colPlazo, N, 1).getFormat().getFill().setColor(cfg.colorManual);
 
   // --- Filas de resumen final en negrita ---
   ws.getRangeByIndexes(filaResIni, 0, 3, COLS).getFormat().getFont().setBold(true);
 
-  // --- Resaltados que dependen de valores (solo LECTURA, no se recalcula nada) ---
+  // --- Naranja: ofertas con aviso (PEM sin convertir y/o oferta incompleta; pueden
+  //     venir los dos concatenados en la misma celda). Solo LECTURA para decidir ---
   let vals = ws.getRangeByIndexes(1, 0, N, COLS).getValues();
-  let mn = 0, hayMin = false;
   for (let i = 0; i < N; i++) {
-    let v = vals[i][colPec];
-    if (typeof v === "number") {
-      if (!hayMin || v < mn) { mn = v; hayMin = true; }
-    }
-  }
-  for (let i = 0; i < N; i++) {
-    // Verde: la oferta mas economica
-    if (hayMin && vals[i][colPec] === mn) {
-      ws.getRangeByIndexes(1 + i, 0, 1, COLS).getFormat().getFill().setColor(cfg.colorMejor);
-    }
-    // Naranja: ofertas con aviso de posible PEM sin convertir
     if (String(vals[i][colAviso]) !== "") {
       let c = ws.getRangeByIndexes(1 + i, colAviso, 1, 1);
       c.getFormat().getFill().setColor(cfg.colorAlerta);
@@ -189,24 +263,22 @@ function formatearResumen(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) {
     }
   }
 
-  // --- Filas de AVISO de descuadre entre hojas: naranja y negrita, que canten ---
-  if (numAvisos > 0) {
-    let rA = ws.getRangeByIndexes(filaAvisoIni, 0, numAvisos, COLS);
-    rA.getFormat().getFill().setColor(cfg.colorAlerta);
-    rA.getFormat().getFont().setBold(true);
-  }
+  // --- Celda de CUADRE visible ---
+  pintarCuadre(ws, filaCuadre, 0, colCuadre, cfg);
 
   // --- Anchos ---
-  ws.getRangeByIndexes(0, 0, 1, 1).getFormat().setColumnWidth(200);
+  ws.getRangeByIndexes(0, colRanking, 1, 1).getFormat().setColumnWidth(70);
+  ws.getRangeByIndexes(0, colEmpresa, 1, 1).getFormat().setColumnWidth(200);
   ws.getRangeByIndexes(0, colPem, 1, colAviso - colPem).getFormat().setColumnWidth(115);
   ws.getRangeByIndexes(0, colAviso, 1, 1).getFormat().setColumnWidth(340);
+  ws.getRangeByIndexes(0, colPlazo, 1, 1).getFormat().setColumnWidth(115);
 
-  // --- Inmovilizar: 1 fila y 1 columna ---
-  fijarPaneles(ws, 1, 1);
+  // --- Inmovilizar: 1 fila y las columnas Ranking + Empresa ---
+  fijarPaneles(ws, 1, colEmpresa + 1);
 }
 
 // =====================================================================================
-// HOJA 2: "Resumen capitulos"
+// HOJA "Resumen capitulos"
 // =====================================================================================
 function formatearCapitulos(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) {
   let ws = hojaDelContrato(wb, meta, "HOJA_CAPITULOS");
@@ -219,6 +291,8 @@ function formatearCapitulos(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB)
   const colMedia = metaNum(meta, "CAP_COL_MEDIA");
   const col1a = metaNum(meta, "CAP_COL_PRIMERA_OFERTA");
   const porOferta = metaNum(meta, "CAP_COLS_POR_OFERTA");
+  const filaCuadre = metaNum(meta, "CAP_FILA_CUADRE");
+  const colCuadre = metaNum(meta, "CAP_COL_CUADRE");
   const nDatos = numCap + 1; // capitulos + fila TOTAL
 
   formatearCabeceraDoble(ws, COLS, N, col1a, porOferta, cfg);
@@ -244,7 +318,11 @@ function formatearCapitulos(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB)
   filaT.getFormat().getFont().setBold(true);
   filaT.getFormat().getFill().setColor(cfg.colorTotal);
 
-  // --- Bordes gruesos encuadrando el bloque de cada oferta ---
+  // --- Celda de CUADRE visible (fuera del marco de cada oferta, a proposito) ---
+  pintarCuadre(ws, filaCuadre, 0, colCuadre, cfg);
+
+  // --- Bordes gruesos encuadrando el bloque de cada oferta (hasta la fila TOTAL:
+  //     la fila de CUADRE queda fuera del marco) ---
   for (let i = 0; i < N; i++) {
     encuadrar(ws, 0, col1a + i * porOferta, filaTotal + 1, porOferta);
   }
@@ -260,7 +338,7 @@ function formatearCapitulos(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB)
 }
 
 // =====================================================================================
-// HOJA 3: "Resumen agrupado"
+// HOJA "Resumen agrupado"
 // =====================================================================================
 function formatearAgrupado(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) {
   let ws = hojaDelContrato(wb, meta, "HOJA_AGRUPADO");
@@ -275,6 +353,8 @@ function formatearAgrupado(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) 
   const colMedia = metaNum(meta, "AGR_COL_MEDIA");
   const col1a = metaNum(meta, "AGR_COL_PRIMERA_OFERTA");
   const porOferta = metaNum(meta, "AGR_COLS_POR_OFERTA");
+  const filaCuadre = metaNum(meta, "AGR_FILA_CUADRE");
+  const colCuadre = metaNum(meta, "AGR_COL_CUADRE");
   const nDatos = numGrupos + 1; // grupos + fila TOTAL
 
   formatearCabeceraDoble(ws, COLS, N, col1a, porOferta, cfg);
@@ -305,7 +385,10 @@ function formatearAgrupado(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) 
     rA.getFormat().getFont().setBold(true);
   }
 
-  // --- Bordes gruesos encuadrando el bloque de cada oferta ---
+  // --- Celda de CUADRE visible (fuera del marco de cada oferta, a proposito) ---
+  pintarCuadre(ws, filaCuadre, 0, colCuadre, cfg);
+
+  // --- Bordes gruesos encuadrando el bloque de cada oferta (hasta la fila TOTAL) ---
   for (let i = 0; i < N; i++) {
     encuadrar(ws, 0, col1a + i * porOferta, filaTotal + 1, porOferta);
   }
@@ -321,7 +404,7 @@ function formatearAgrupado(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) 
 }
 
 // =====================================================================================
-// HOJA 4: "Comparativa partidas"
+// HOJA "Comparativa partidas"
 // =====================================================================================
 function formatearPartidas(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) {
   let ws = hojaDelContrato(wb, meta, "HOJA_PARTIDAS");
@@ -339,6 +422,11 @@ function formatearPartidas(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) 
   const porOferta = metaNum(meta, "PART_COLS_POR_OFERTA");
   const colBarata = metaNum(meta, "PART_COL_MAS_BARATA");
   const colDesv = metaNum(meta, "PART_COL_DESV");
+  const colAlcance = metaNum(meta, "PART_COL_ALCANCE");
+  const colDesvMedia = metaNum(meta, "PART_COL_DESV_MEDIA");
+  const filaTotal = metaNum(meta, "PART_FILA_TOTAL");
+  const filaCuadre = metaNum(meta, "PART_FILA_CUADRE");
+  const colCuadre = metaNum(meta, "PART_COL_CUADRE");
 
   // --- Cabecera (2 filas). Deshacer merges antes de rehacerlos (idempotencia) ---
   let bloqueCab = ws.getRangeByIndexes(0, 0, headFilas, COLS);
@@ -347,7 +435,8 @@ function formatearPartidas(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) 
   for (let i = 0; i < N; i++) {                                        // una celda por empresa
     ws.getRangeByIndexes(0, col1a + i * porOferta, 1, porOferta).merge(false);
   }
-  ws.getRangeByIndexes(0, colBarata, 1, 2).merge(false);              // bloque COMPARACION
+  // Bloque COMPARACION: ahora abarca Mas barata, Δ %, Alcance y Desv. s/media
+  ws.getRangeByIndexes(0, colBarata, 1, COLS - colBarata).merge(false);
 
   let cab0 = ws.getRangeByIndexes(0, 0, 1, COLS);
   cab0.getFormat().getFont().setBold(true);
@@ -360,11 +449,12 @@ function formatearPartidas(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) 
   cab1.getFormat().getFill().setColor(cfg.colorCabecera2);
   cab1.getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
 
-  // --- Formatos de numero por rangos ---
+  // --- Formatos de numero por rangos. Los Importes se extienden UNA fila mas para
+  //     cubrir la fila "TOTAL partidas" (filaTotal = headFilas + nDatos) ---
   ws.getRangeByIndexes(headFilas, colMedicion, nDatos, 1).setNumberFormat(cfg.fmtNum2);
   for (let i = 0; i < N; i++) {
-    ws.getRangeByIndexes(headFilas, col1a + i * porOferta, nDatos, 1).setNumberFormat(cfg.fmtNum2);       // P. Unit
-    ws.getRangeByIndexes(headFilas, col1a + i * porOferta + 1, nDatos, 1).setNumberFormat(cfg.fmtEuro2);  // Importe
+    ws.getRangeByIndexes(headFilas, col1a + i * porOferta, nDatos, 1).setNumberFormat(cfg.fmtNum2);           // P. Unit
+    ws.getRangeByIndexes(headFilas, col1a + i * porOferta + 1, nDatos + 1, 1).setNumberFormat(cfg.fmtEuro2);  // Importe + TOTAL
   }
   ws.getRangeByIndexes(headFilas, colDesv, nDatos, 1).setNumberFormat(cfg.fmtPct);
 
@@ -372,8 +462,10 @@ function formatearPartidas(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) 
   //     mucha desviacion (partidas con gran horquilla de precios) en rojo ---
   escalaSemaforo(ws, headFilas, colDesv, nDatos, cfg);
 
-  // --- Sombreado de filas segun la columna Tipo (una sola lectura en bloque) ---
+  // --- Sombreado por filas segun la columna Tipo + resaltado de Alcance (una sola
+  //     lectura en bloque; solo lectura para decidir formatos) ---
   // Tipo="Capitulo" → azul fuerte; Tipo="Subcapitulo" → azul claro; ambas en negrita.
+  // Alcance no vacio ("SOLO <oferta>") → celda naranja + negrita: diferencia de alcance.
   let vals = ws.getRangeByIndexes(headFilas, 0, nDatos, COLS).getValues();
   for (let r = 0; r < nDatos; r++) {
     let tipo = String(vals[r][colTipo]);
@@ -382,11 +474,25 @@ function formatearPartidas(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) 
       fila.getFormat().getFill().setColor(tipo === "Capitulo" ? cfg.colorCapitulo : cfg.colorSubcapitulo);
       fila.getFormat().getFont().setBold(true);
     }
+    if (String(vals[r][colAlcance]) !== "") {
+      let c = ws.getRangeByIndexes(headFilas + r, colAlcance, 1, 1);
+      c.getFormat().getFill().setColor(cfg.colorAlerta);
+      c.getFormat().getFont().setBold(true);
+    }
   }
 
-  // --- Bordes gruesos encuadrando el bloque (P. Unit + Importe) de cada oferta ---
+  // --- Fila TOTAL partidas: negrita y mismo fondo que las filas TOTAL de otras hojas ---
+  let filaT = ws.getRangeByIndexes(filaTotal, 0, 1, COLS);
+  filaT.getFormat().getFont().setBold(true);
+  filaT.getFormat().getFill().setColor(cfg.colorTotal);
+
+  // --- Celda de CUADRE visible ---
+  pintarCuadre(ws, filaCuadre, 0, colCuadre, cfg);
+
+  // --- Bordes gruesos encuadrando el bloque (P. Unit + Importe) de cada oferta,
+  //     incluida la fila TOTAL partidas (el CUADRE queda fuera del marco) ---
   for (let i = 0; i < N; i++) {
-    encuadrar(ws, 0, col1a + i * porOferta, headFilas + nDatos, porOferta);
+    encuadrar(ws, 0, col1a + i * porOferta, filaTotal + 1, porOferta);
   }
 
   // --- Anchos ---
@@ -396,9 +502,59 @@ function formatearPartidas(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) 
   ws.getRangeByIndexes(0, colUd, 1, 1).getFormat().setColumnWidth(45);
   ws.getRangeByIndexes(0, colMedicion, 1, 1).getFormat().setColumnWidth(90);
   ws.getRangeByIndexes(0, colBarata, 1, 1).getFormat().setColumnWidth(100);
+  ws.getRangeByIndexes(0, colAlcance, 1, 1).getFormat().setColumnWidth(140);
+  ws.getRangeByIndexes(0, colDesvMedia, 1, 1).getFormat().setColumnWidth(260);
 
   // --- Inmovilizar: 2 filas de cabecera y las columnas fijas hasta Medicion ---
   fijarPaneles(ws, headFilas, colsFijas);
+}
+
+// =====================================================================================
+// HOJA "Top desviaciones"
+// =====================================================================================
+// Las partidas con mayor diferencia en euros entre ofertas. Semaforo sobre "Dif €"
+// para que el dinero en juego salte a la vista.
+function formatearTop(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) {
+  let ws = hojaDelContrato(wb, meta, "HOJA_TOP");
+  limpiarCondicionales(ws);
+  const N = metaNum(meta, "NUM_OFERTAS");
+  const COLS = metaNum(meta, "TOP_NUM_COLS");
+  const headFilas = metaNum(meta, "TOP_HEADER_FILAS");
+  const nDatos = metaNum(meta, "TOP_NUM_FILAS");
+  const colCodigo = metaNum(meta, "TOP_COL_CODIGO");
+  const colResumen = metaNum(meta, "TOP_COL_RESUMEN");
+  const col1a = metaNum(meta, "TOP_COL_PRIMERA_OFERTA");
+  const porOferta = metaNum(meta, "TOP_COLS_POR_OFERTA");
+  const colDifEur = metaNum(meta, "TOP_COL_DIF_EUR");
+  const colDifPct = metaNum(meta, "TOP_COL_DIF_PCT");
+  const colBarata = metaNum(meta, "TOP_COL_MAS_BARATA");
+
+  // --- Cabecera corporativa (1 fila) ---
+  let cab = ws.getRangeByIndexes(0, 0, headFilas, COLS);
+  cab.getFormat().getFont().setBold(true);
+  cab.getFormat().getFont().setColor("FFFFFF");
+  cab.getFormat().getFill().setColor(cfg.colorCabecera);
+  cab.getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+
+  if (nDatos > 0) {
+    // --- Formatos de numero: importes por oferta (1 col/oferta, contiguas) y Dif €
+    //     en euros; Dif % en porcentaje ---
+    ws.getRangeByIndexes(headFilas, col1a, nDatos, N * porOferta).setNumberFormat(cfg.fmtEuro2);
+    ws.getRangeByIndexes(headFilas, colDifEur, nDatos, 1).setNumberFormat(cfg.fmtEuro2);
+    ws.getRangeByIndexes(headFilas, colDifPct, nDatos, 1).setNumberFormat(cfg.fmtPct);
+
+    // --- SEMÁFORO sobre Dif €: las mayores diferencias en rojo ---
+    escalaSemaforo(ws, headFilas, colDifEur, nDatos, cfg);
+  }
+
+  // --- Anchos ---
+  ws.getRangeByIndexes(0, 0, 1, COLS).getFormat().setColumnWidth(110);   // por defecto
+  ws.getRangeByIndexes(0, colCodigo, 1, 1).getFormat().setColumnWidth(85);
+  ws.getRangeByIndexes(0, colResumen, 1, 1).getFormat().setColumnWidth(330);
+  ws.getRangeByIndexes(0, colBarata, 1, 1).getFormat().setColumnWidth(110);
+
+  // --- Inmovilizar la fila de cabecera ---
+  fijarPaneles(ws, headFilas, 0);
 }
 
 // =====================================================================================
@@ -414,14 +570,38 @@ function limpiezaFinal(wb: ExcelScript.Workbook, meta: Contrato, cfg: CfgB) {
   // El contrato se queda OCULTO (no se borra: permite re-ejecutar B sin repetir A)
   let c = wb.getWorksheet(cfg.hojaContrato);
   if (c) { c.setVisibility(ExcelScript.SheetVisibility.hidden); }
-  // Dejar activa la hoja de resumen
-  let rs = wb.getWorksheet(metaStr(meta, "HOJA_RESUMEN"));
-  if (rs) { rs.activate(); }
+  // Dejar activa la Portada (el resumen ejecutivo es lo primero que se quiere ver)
+  let por = wb.getWorksheet(metaStr(meta, "HOJA_PORTADA"));
+  if (por) { por.activate(); }
 }
 
 // =====================================================================================
 // AYUDANTES DE FORMATO
 // =====================================================================================
+
+// Celda de CUADRE: verde + negrita si el texto empieza por "CUADRE OK"; rojo con letra
+// blanca + negrita si empieza por "DESCUADRE". Se pinta el tramo desde la etiqueta
+// (colEtiqueta) hasta la celda del texto (colTexto), ambas incluidas. La lectura del
+// valor es SOLO para decidir el formato.
+function pintarCuadre(ws: ExcelScript.Worksheet, fila: number, colEtiqueta: number,
+  colTexto: number, cfg: CfgB) {
+  let v = ws.getRangeByIndexes(fila, colTexto, 1, 1).getValues();
+  let texto = String(v[0][0]);
+  let esOk = texto.indexOf("CUADRE OK") === 0;
+  let esMal = texto.indexOf("DESCUADRE") === 0;
+  if (!esOk && !esMal) { return; } // contenido inesperado: no pintar nada
+
+  let ancho = colTexto - colEtiqueta + 1;
+  let r = ws.getRangeByIndexes(fila, colEtiqueta, 1, ancho);
+  r.getFormat().getFont().setBold(true);
+  if (esOk) {
+    r.getFormat().getFill().setColor(cfg.colorCuadreOk);
+    r.getFormat().getFont().setColor(cfg.colorCuadreOkTexto);
+  } else {
+    r.getFormat().getFill().setColor(cfg.colorCuadreMal);
+    r.getFormat().getFont().setColor(cfg.colorCuadreMalTexto);
+  }
+}
 
 // Cabecera doble estandar (hojas de capitulos y agrupado): fila 0 con el nombre de cada
 // constructora combinado sobre sus columnas, fila 1 con los titulos de columna.
@@ -535,6 +715,10 @@ interface CfgB {
   colorAlerta: string;
   colorTotal: string;
   colorManual: string;
+  colorCuadreOk: string;
+  colorCuadreOkTexto: string;
+  colorCuadreMal: string;
+  colorCuadreMalTexto: string;
   escalaVerde: string;
   escalaAmarillo: string;
   escalaRojo: string;
