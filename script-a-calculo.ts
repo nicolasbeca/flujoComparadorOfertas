@@ -331,6 +331,28 @@ function main(workbook: ExcelScript.Workbook, ofertasJson?: string) {
   }
 
   // ===================================================================================
+  // VALIDACIÓN CONTRA EL TOTAL DE ORIGEN (red de seguridad; solo avisa, nunca corrige)
+  // ===================================================================================
+  // El Lector devuelve totalOrigen/totalEncontrado: el TOTAL GENERAL declarado al pie
+  // del Excel de cada constructora. Aqui se compara con el TOTAL PEC calculado (suma de
+  // filas de capitulos padre). Si no cuadra, hay un capitulo CXX perdido o contado de
+  // mas y se AVISA por el canal de avisos de datos ("Resumen agrupado"). El criterio
+  // maestro no cambia: manda SIEMPRE el numero calculado; totalOrigen es solo referencia.
+  // Ofertas viejas sin estos campos (totalEncontrado undefined) cuentan como "sin total
+  // de origen", no como descuadre.
+  for (let i = 0; i < N; i++) {
+    if (ofertas[i].totalEncontrado === true) {
+      let tOriRaw = ofertas[i].totalOrigen;
+      let tOri = r2(typeof tOriRaw === "number" ? tOriRaw : 0);
+      if (Math.abs(tOri - totalPEC[i]) > TOLERANCIA_CUADRE_TOTAL) {
+        avisosDatos.push("AVISO " + nombres[i] + ": DESCUADRE con el presupuesto de origen. El total del Excel original (" + r2(tOri) + " EUR) no coincide con la suma de capitulos padre (" + r2(totalPEC[i]) + " EUR). Diferencia: " + r2(tOri - totalPEC[i]) + " EUR. Revisa en el Excel original si hay algun capitulo CXX fuera del computo o un codigo CXX contado de mas (por ejemplo, un subcapitulo con codigo enganoso tipo C49).");
+      }
+    } else {
+      avisosDatos.push("AVISO " + nombres[i] + ": no se pudo leer el total general del Excel de origen, asi que no se ha podido comprobar que la suma de capitulos padre cuadre con el presupuesto. Revisa el Excel de origen.");
+    }
+  }
+
+  // ===================================================================================
   // COMPROBACIÓN POR CAPÍTULO (no manda, solo avisa): partidas vs fila del padre
   // ===================================================================================
   // avisoCap[cap] = nombres de las ofertas donde la suma de partidas del capitulo no
@@ -1272,8 +1294,10 @@ interface Fila {
 interface Oferta {
   nombre: string;
   filas: Fila[];
-  numPartidas?: number;  // lo aporta el script lector (nº de partidas reales leidas)
-  obra?: string;         // nombre de obra, opcional (para la Portada)
+  numPartidas?: number;      // lo aporta el script lector (nº de partidas reales leidas)
+  obra?: string;             // nombre de obra, opcional (para la Portada)
+  totalOrigen?: number;      // TOTAL GENERAL declarado al pie del Excel de origen (Lector)
+  totalEncontrado?: boolean; // false/undefined = sin total de origen (no es descuadre)
 }
 interface CodeInfo { codigo: string; tipo: string; resumen: string; unidad: string; medicion: number; }
 interface Cmp { emp: string; pct: number; }
